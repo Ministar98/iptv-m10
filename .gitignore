@@ -1,0 +1,27 @@
+# CMake
+build/
+cmake-build-*/
+
+# Node.js
+node_modules/
+dist/
+
+# Runtime data
+runtime/*
+!runtime/.gitkeep
+
+# Media files
+media/*.mp4
+media/*.ts
+media/*.mkv
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
