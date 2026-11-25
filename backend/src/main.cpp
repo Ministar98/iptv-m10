@@ -1,6 +1,8 @@
 #include "UdpSocket.hpp"
 #include "RtpParser.hpp"
 #include "TsParser.hpp"
+#include "PsiSectionAssembler.hpp"
+#include "PatParser.hpp"
 
 #include <array>
 #include <cstddef>
@@ -8,6 +10,8 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <set>
+#include <tuple>
 
 namespace
 {
@@ -15,28 +19,59 @@ namespace
 
     constexpr std::size_t TEST_PACKET_COUNT = 200;
 
-    struct PidStatistics
+    void printPat(const PatTable& table)
     {
-        std::size_t packetCount = 0;
+        std::cout << "\n========== PAT TABLE ==========\n";
 
-        std::size_t payloadCount = 0;
+        std::cout << "Transport Stream ID: "
+                  << table.transportStreamId << '\n';
 
-        std::size_t payloadBytes = 0;
+        std::cout << "Version: "
+                  << static_cast<int>(
+                         table.versionNumber
+                     ) << '\n';
 
-        std::size_t payloadUnitStarts = 0;
+        std::cout << "Current table: "
+                  << (table.currentNextIndicator
+                      ? "Yes" : "No") << '\n';
 
-        std::size_t adaptationFields = 0;
+        std::cout << "Section: "
+                  << static_cast<int>(
+                         table.sectionNumber
+                     )
+                  << "/"
+                  << static_cast<int>(
+                         table.lastSectionNumber
+                     ) << '\n';
 
-        std::size_t pcrCount = 0;
+        std::cout << "Programs: "
+                  << table.programs.size() << '\n';
 
-        std::size_t transportErrors = 0;
+        if (table.hasNetworkPid)
+        {
+            std::cout << "Network PID: "
+                      << table.networkPid << '\n';
+        }
 
-        std::size_t continuityWarnings = 0;
+        for (const auto& program : table.programs)
+        {
+            std::cout
+                << "Program number: "
+                << program.programNumber
+                << " -> PMT PID: 0x"
+                << std::hex
+                << std::setw(4)
+                << std::setfill('0')
+                << program.pmtPid
+                << std::dec
+                << std::setfill(' ')
+                << " (" << program.pmtPid << ")\n";
+        }
 
-        bool hasPreviousCounter = false;
+        std::cout << "CRC32: VALID\n";
 
-        std::uint8_t previousCounter = 0;
-    };
+        std::cout << "===============================\n";
+    }
 }
 
 int main()
@@ -51,28 +86,57 @@ int main()
         return 1;
     }
 
-    std::cout << "IPTV M10 MPEG-TS Receiver\n";
+    std::cout << "IPTV M10 PAT Receiver\n";
 
     std::cout << "Listening on UDP port "
               << RTP_PORT << std::endl;
 
+    PsiSectionAssembler patAssembler(
+        TsParser::PAT_PID
+    );
+
     std::array<std::uint8_t, 65536> buffer{};
 
-    std::map<std::uint16_t, PidStatistics> pidStats;
-
     std::size_t validRtpPackets = 0;
+
     std::size_t invalidRtpPackets = 0;
 
     std::size_t validTsPackets = 0;
+
     std::size_t invalidTsPackets = 0;
 
     std::size_t transportErrors = 0;
 
     std::size_t rtpDiscontinuities = 0;
 
+    std::size_t patPackets = 0;
+
+    std::size_t validPatSections = 0;
+
+    std::size_t invalidPatSections = 0;
+
     std::uint16_t previousSequence = 0;
 
     bool hasPreviousSequence = false;
+
+    std::uint32_t activeSsrc = 0;
+
+    bool hasActiveSsrc = false;
+
+    std::size_t unexpectedSsrcPackets = 0;
+
+    std::map<std::uint16_t, std::size_t> pidCounts;
+
+    std::map<std::uint16_t, std::uint16_t> programs;
+
+    using PatKey = std::tuple<
+        std::uint16_t,
+        std::uint8_t,
+        std::uint8_t,
+        bool
+    >;
+
+    std::set<PatKey> printedSections;
 
     for (std::size_t i = 0;
          i < TEST_PACKET_COUNT;
@@ -95,7 +159,9 @@ int main()
 
         if (!RtpParser::parse(
                 buffer.data(),
-                static_cast<std::size_t>(receivedBytes),
+                static_cast<std::size_t>(
+                    receivedBytes
+                ),
                 rtpPacket))
         {
             ++invalidRtpPackets;
@@ -104,14 +170,8 @@ int main()
         }
 
         if (rtpPacket.payloadType !=
-            RtpParser::MPEG_TS_PAYLOAD_TYPE)
-        {
-            ++invalidRtpPackets;
-
-            continue;
-        }
-
-        if (rtpPacket.payloadSize == 0 ||
+            RtpParser::MPEG_TS_PAYLOAD_TYPE ||
+            rtpPacket.payloadSize == 0 ||
             rtpPacket.payloadSize %
                 TsParser::PACKET_SIZE != 0)
         {
@@ -120,9 +180,21 @@ int main()
             continue;
         }
 
-        ++validRtpPackets;
+        if (!hasActiveSsrc)
+        {
+            activeSsrc = rtpPacket.ssrc;
 
-        // RTP sequence monitoring
+            hasActiveSsrc = true;
+        }
+
+        if (rtpPacket.ssrc != activeSsrc)
+        {
+            ++unexpectedSsrcPackets;
+
+            continue;
+        }
+
+        ++validRtpPackets;
 
         if (hasPreviousSequence)
         {
@@ -135,6 +207,8 @@ int main()
                 expectedSequence)
             {
                 ++rtpDiscontinuities;
+
+                patAssembler.reset();
             }
         }
 
@@ -142,8 +216,6 @@ int main()
             rtpPacket.sequenceNumber;
 
         hasPreviousSequence = true;
-
-        // Parse individual MPEG-TS packets
 
         for (std::size_t offset = 0;
              offset < rtpPacket.payloadSize;
@@ -158,85 +230,80 @@ int main()
             {
                 ++invalidTsPackets;
 
+                patAssembler.reset();
+
                 continue;
             }
 
             ++validTsPackets;
 
-            PidStatistics& stats =
-                pidStats[tsPacket.pid];
-
-            ++stats.packetCount;
+            ++pidCounts[tsPacket.pid];
 
             if (tsPacket.transportError)
             {
                 ++transportErrors;
 
-                ++stats.transportErrors;
-
-                stats.hasPreviousCounter = false;
+                if (tsPacket.pid == TsParser::PAT_PID)
+                {
+                    patAssembler.reset();
+                }
 
                 continue;
             }
 
-            if (tsPacket.hasAdaptationField)
+            if (tsPacket.pid != TsParser::PAT_PID)
             {
-                ++stats.adaptationFields;
+                continue;
             }
 
-            if (tsPacket.hasPcr)
+            ++patPackets;
+
+            const auto sections =
+                patAssembler.push(tsPacket);
+
+            for (const auto& section : sections)
             {
-                ++stats.pcrCount;
-            }
+                PatTable table{};
 
-            if (tsPacket.payloadUnitStart)
-            {
-                ++stats.payloadUnitStarts;
-            }
-
-            if (tsPacket.hasPayload)
-            {
-                ++stats.payloadCount;
-
-                stats.payloadBytes +=
-                    tsPacket.payloadSize;
-            }
-
-            // Basic continuity monitoring
-
-            if (tsPacket.pid != TsParser::NULL_PID)
-            {
-                if (tsPacket.discontinuityIndicator)
+                if (!PatParser::parse(
+                        section.data(),
+                        section.size(),
+                        table))
                 {
-                    stats.hasPreviousCounter = false;
+                    ++invalidPatSections;
+
+                    continue;
                 }
 
-                if (stats.hasPreviousCounter)
-                {
-                    const std::uint8_t expectedCounter =
-                        static_cast<std::uint8_t>(
-                            (stats.previousCounter +
-                             (tsPacket.hasPayload ? 1 : 0))
-                            & 0x0F
-                        );
+                ++validPatSections;
 
-                    if (tsPacket.continuityCounter !=
-                        expectedCounter)
+                const PatKey key{
+                    table.transportStreamId,
+                    table.versionNumber,
+                    table.sectionNumber,
+                    table.currentNextIndicator
+                };
+
+                if (printedSections.insert(key).second)
+                {
+                    printPat(table);
+                }
+
+                if (table.currentNextIndicator)
+                {
+                    for (const auto& program :
+                         table.programs)
                     {
-                        ++stats.continuityWarnings;
+                        programs[program.programNumber] =
+                            program.pmtPid;
                     }
                 }
-
-                stats.previousCounter =
-                    tsPacket.continuityCounter;
-
-                stats.hasPreviousCounter = true;
             }
         }
     }
 
     std::cout
-        << "\n========== MPEG-TS TEST SUMMARY ==========\n";
+        << "\n========== PAT TEST SUMMARY ==========\n";
 
     std::cout << "Received RTP datagrams: "
               << TEST_PACKET_COUNT << '\n';
@@ -246,6 +313,9 @@ int main()
 
     std::cout << "Invalid RTP packets: "
               << invalidRtpPackets << '\n';
+
+    std::cout << "Unexpected SSRC packets: "
+              << unexpectedSsrcPackets << '\n';
 
     std::cout << "RTP sequence discontinuities: "
               << rtpDiscontinuities << '\n';
@@ -259,66 +329,58 @@ int main()
     std::cout << "Transport errors: "
               << transportErrors << '\n';
 
-    std::cout << "Detected PIDs: "
-              << pidStats.size() << '\n';
+    std::cout << "PAT packets: "
+              << patPackets << '\n';
 
-    std::cout
-        << "\n=============== PID STATISTICS ===============\n";
+    std::cout << "Valid PAT sections: "
+              << validPatSections << '\n';
 
-    for (const auto& [pid, stats] : pidStats)
+    std::cout << "Invalid PAT sections: "
+              << invalidPatSections << '\n';
+
+    std::cout << "Detected programs: "
+              << programs.size() << '\n';
+
+    std::cout << "\nDetected program mapping:\n";
+
+    for (const auto& [programNumber, pmtPid] :
+         programs)
     {
         std::cout
-            << "\nPID: 0x"
+            << "Program "
+            << programNumber
+            << " -> PMT PID "
+            << pmtPid
+            << '\n';
+    }
+
+    std::cout << "\nDetected PID statistics:\n";
+
+    for (const auto& [pid, count] : pidCounts)
+    {
+        std::cout
+            << "PID 0x"
             << std::hex
             << std::setw(4)
             << std::setfill('0')
             << pid
             << std::dec
             << std::setfill(' ')
-            << " (" << pid << ")";
-
-        if (pid == TsParser::PAT_PID)
-        {
-            std::cout << " [PAT]";
-        }
-        else if (pid == TsParser::NULL_PID)
-        {
-            std::cout << " [NULL]";
-        }
-
-        std::cout << '\n';
-
-        std::cout << "  Packets: "
-                  << stats.packetCount << '\n';
-
-        std::cout << "  Payload packets: "
-                  << stats.payloadCount << '\n';
-
-        std::cout << "  Payload bytes: "
-                  << stats.payloadBytes << '\n';
-
-        std::cout << "  PUSI count: "
-                  << stats.payloadUnitStarts << '\n';
-
-        std::cout << "  Adaptation fields: "
-                  << stats.adaptationFields << '\n';
-
-        std::cout << "  PCR count: "
-                  << stats.pcrCount << '\n';
-
-        std::cout << "  Transport errors: "
-                  << stats.transportErrors << '\n';
-
-        std::cout << "  Continuity warnings: "
-                  << stats.continuityWarnings << '\n';
+            << ": "
+            << count
+            << " packets\n";
     }
 
     std::cout
-        << "\n==============================================\n";
+        << "======================================\n";
 
     return (
         invalidRtpPackets == 0 &&
         invalidTsPackets == 0 &&
-        transportErrors == 0
+        unexpectedSsrcPackets == 0 &&
+        transportErrors == 0 &&
+        invalidPatSections == 0 &&
+        validPatSections > 0 &&
+        !programs.empty()
     ) ? 0 : 1;
 }

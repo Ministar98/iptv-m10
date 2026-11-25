@@ -30,6 +30,27 @@ target_compile_options(iptv_ts PRIVATE
     -Wpedantic
 )
 
+# PSI and PAT library
+
+add_library(iptv_psi STATIC
+    src/PsiSectionAssembler.cpp
+    src/PatParser.cpp
+)
+
+target_include_directories(iptv_psi PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_psi PUBLIC
+    iptv_ts
+)
+
+target_compile_options(iptv_psi PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 # Backend application
 
 add_executable(iptv_backend
@@ -40,6 +61,7 @@ add_executable(iptv_backend
 target_link_libraries(iptv_backend PRIVATE
     iptv_rtp
     iptv_ts
+    iptv_psi
 )
 
 target_compile_options(iptv_backend PRIVATE
@@ -97,5 +119,57 @@ add_test(
 
 set_tests_properties(
     ts_parser_unit_test
+    PROPERTIES TIMEOUT 5
+)
+
+# PSI assembler tests
+
+add_executable(psi_assembler_test
+    tests/PsiSectionAssemblerTest.cpp
+)
+
+target_link_libraries(psi_assembler_test PRIVATE
+    iptv_psi
+)
+
+target_compile_options(psi_assembler_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME psi_assembler_unit_test
+    COMMAND psi_assembler_test
+)
+
+set_tests_properties(
+    psi_assembler_unit_test
+    PROPERTIES TIMEOUT 5
+)
+
+# PAT parser tests
+
+add_executable(pat_parser_test
+    tests/PatParserTest.cpp
+)
+
+target_link_libraries(pat_parser_test PRIVATE
+    iptv_psi
+)
+
+target_compile_options(pat_parser_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME pat_parser_unit_test
+    COMMAND pat_parser_test
+)
+
+set_tests_properties(
+    pat_parser_unit_test
     PROPERTIES TIMEOUT 5
 )
