@@ -52,17 +52,50 @@ target_compile_options(iptv_psi PRIVATE
     -Wpedantic
 )
 
+# UDP socket library
+
+add_library(iptv_udp STATIC
+    src/UdpSocket.cpp
+)
+
+target_include_directories(iptv_udp PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(iptv_udp PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+# HLS segmenter library
+
+add_library(iptv_hls STATIC
+    src/HlsSegmenter.cpp
+)
+
+target_include_directories(iptv_hls PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(iptv_hls PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 # Backend application
 
 add_executable(iptv_backend
     src/main.cpp
-    src/UdpSocket.cpp
 )
 
 target_link_libraries(iptv_backend PRIVATE
+    iptv_udp
     iptv_rtp
     iptv_ts
     iptv_psi
+    iptv_hls
 )
 
 target_compile_options(iptv_backend PRIVATE
@@ -199,4 +232,46 @@ add_test(
 set_tests_properties(
     pmt_parser_unit_test
     PROPERTIES TIMEOUT 5
+)
+
+# UDP socket tests
+
+add_executable(udp_socket_test
+    tests/UdpSocketTest.cpp
+)
+
+target_link_libraries(udp_socket_test PRIVATE
+    iptv_udp
+)
+
+target_compile_options(udp_socket_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME udp_socket_unit_test
+    COMMAND udp_socket_test
+)
+
+set_tests_properties(
+    udp_socket_unit_test
+    PROPERTIES TIMEOUT 5
+)
+
+# HLS segmenter integration test
+
+add_executable(hls_segmenter_test
+    tests/HlsSegmenterTest.cpp
+)
+
+target_link_libraries(hls_segmenter_test PRIVATE
+    iptv_hls
+)
+
+target_compile_options(hls_segmenter_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
 )

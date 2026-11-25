@@ -4,21 +4,76 @@
 #include "PsiSectionAssembler.hpp"
 #include "PatParser.hpp"
 #include "PmtParser.hpp"
+#include "HlsSegmenter.hpp"
 
 #include <array>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <set>
 #include <tuple>
+#include <system_error>
 
 namespace
 {
     constexpr std::uint16_t RTP_PORT = 5004;
 
-    constexpr std::size_t TEST_PACKET_COUNT = 200;
+    constexpr unsigned int RECEIVE_TIMEOUT_MS = 200;
+
+    constexpr int RECEIVE_BUFFER_SIZE =
+        1024 * 1024;
+
+    constexpr int STATISTICS_INTERVAL_SECONDS = 5;
+
+    constexpr int SIGNAL_TIMEOUT_SECONDS = 3;
+
+    volatile std::sig_atomic_t stopRequested = 0;
+
+    void handleSignal(int)
+    {
+        stopRequested = 1;
+    }
+
+    struct ReceiverStatistics
+    {
+        std::uint64_t receivedDatagrams = 0;
+
+        std::uint64_t validRtpPackets = 0;
+
+        std::uint64_t invalidRtpPackets = 0;
+
+        std::uint64_t unexpectedSsrcPackets = 0;
+
+        std::uint64_t rtpDiscontinuities = 0;
+
+        std::uint64_t validTsPackets = 0;
+
+        std::uint64_t invalidTsPackets = 0;
+
+        std::uint64_t transportErrors = 0;
+
+        std::uint64_t validPatSections = 0;
+
+        std::uint64_t invalidPatSections = 0;
+
+        std::uint64_t validPmtSections = 0;
+
+        std::uint64_t invalidPmtSections = 0;
+
+        std::uint64_t unexpectedPmtSections = 0;
+
+        std::uint64_t forwardedBytes = 0;
+
+        std::uint64_t hlsWriteErrors = 0;
+
+        std::uint64_t receiveTimeouts = 0;
+    };
 
     void printPid(std::uint16_t pid)
     {
@@ -35,31 +90,38 @@ namespace
 
     void printPat(const PatTable& table)
     {
-        std::cout << "\n========== PAT TABLE ==========\n";
+        std::cout
+            << "\n========== PAT ==========\n";
 
-        std::cout << "Transport Stream ID: "
-                  << table.transportStreamId << '\n';
+        std::cout
+            << "Transport stream ID: "
+            << table.transportStreamId << '\n';
 
-        std::cout << "Version: "
-                  << static_cast<int>(
-                         table.versionNumber
-                     ) << '\n';
+        std::cout
+            << "Version: "
+            << static_cast<int>(
+                table.versionNumber
+            ) << '\n';
 
-        std::cout << "Current table: "
-                  << (table.currentNextIndicator
-                      ? "Yes" : "No") << '\n';
+        std::cout
+            << "Current table: "
+            << (table.currentNextIndicator
+                    ? "YES"
+                    : "NO")
+            << '\n';
 
-        std::cout << "Section: "
-                  << static_cast<int>(
-                         table.sectionNumber
-                     )
-                  << "/"
-                  << static_cast<int>(
-                         table.lastSectionNumber
-                     ) << '\n';
+        for (const auto& program :
+             table.programs)
+        {
+            std::cout
+                << "Program "
+                << program.programNumber
+                << " -> PMT PID ";
 
-        std::cout << "Programs: "
-                  << table.programs.size() << '\n';
+            printPid(program.pmtPid);
+
+            std::cout << '\n';
+        }
 
         if (table.hasNetworkPid)
         {
@@ -70,32 +132,36 @@ namespace
             std::cout << '\n';
         }
 
-        for (const auto& program : table.programs)
-        {
-            std::cout
-                << "Program number: "
-                << program.programNumber
-                << " -> PMT PID: ";
+        std::cout << "CRC: VALID\n";
 
-            printPid(program.pmtPid);
-
-            std::cout << '\n';
-        }
-
-        std::cout << "CRC32: VALID\n";
-
-        std::cout << "===============================\n";
+        std::cout
+            << "=========================\n";
     }
 
     void printPmt(
-        const PmtTable& table,
-        std::uint16_t pmtPid
+        std::uint16_t pmtPid,
+        const PmtTable& table
     )
     {
-        std::cout << "\n========== PMT TABLE ==========\n";
+        std::cout
+            << "\n========== PMT ==========\n";
 
-        std::cout << "Program number: "
-                  << table.programNumber << '\n';
+        std::cout
+            << "Program: "
+            << table.programNumber << '\n';
+
+        std::cout
+            << "Version: "
+            << static_cast<int>(
+                table.versionNumber
+            ) << '\n';
+
+        std::cout
+            << "Current table: "
+            << (table.currentNextIndicator
+                    ? "YES"
+                    : "NO")
+            << '\n';
 
         std::cout << "PMT PID: ";
 
@@ -103,80 +169,177 @@ namespace
 
         std::cout << '\n';
 
-        std::cout << "Version: "
-                  << static_cast<int>(
-                         table.versionNumber
-                     ) << '\n';
-
-        std::cout << "Current table: "
-                  << (table.currentNextIndicator
-                      ? "Yes" : "No") << '\n';
-
         std::cout << "PCR PID: ";
 
         printPid(table.pcrPid);
 
         std::cout << '\n';
 
-        std::cout << "Program info length: "
-                  << table.programInfoLength << '\n';
-
-        std::cout << "Elementary streams: "
-                  << table.streams.size() << '\n';
-
-        for (const auto& stream : table.streams)
+        for (const auto& stream :
+             table.streams)
         {
-            std::cout << "\nStream category: "
-                      << PmtParser::categoryName(
-                             stream.category
-                         ) << '\n';
-
-            std::cout << "  Stream type: 0x"
-                      << std::hex
-                      << std::setw(2)
-                      << std::setfill('0')
-                      << static_cast<int>(
-                             stream.streamType
-                         )
-                      << std::dec
-                      << std::setfill(' ')
-                      << " - "
-                      << PmtParser::streamTypeName(
-                             stream.streamType
-                         ) << '\n';
-
-            std::cout << "  Elementary PID: ";
+            std::cout
+                << PmtParser::categoryName(
+                    stream.category
+                )
+                << " | "
+                << PmtParser::streamTypeName(
+                    stream.streamType
+                )
+                << " | PID ";
 
             printPid(stream.elementaryPid);
 
             std::cout << '\n';
-
-            std::cout << "  ES info length: "
-                      << stream.esInfoLength << '\n';
         }
 
-        std::cout << "\nCRC32: VALID\n";
+        std::cout << "CRC: VALID\n";
 
-        std::cout << "===============================\n";
+        std::cout
+            << "=========================\n";
+    }
+
+    void printStatistics(
+        const ReceiverStatistics& stats
+    )
+    {
+        std::cout
+            << "\n===== Receiver statistics =====\n";
+
+        std::cout
+            << "Received datagrams: "
+            << stats.receivedDatagrams << '\n'
+
+            << "Valid RTP packets: "
+            << stats.validRtpPackets << '\n'
+
+            << "Invalid RTP packets: "
+            << stats.invalidRtpPackets << '\n'
+
+            << "Unexpected SSRC packets: "
+            << stats.unexpectedSsrcPackets << '\n'
+
+            << "RTP discontinuities: "
+            << stats.rtpDiscontinuities << '\n'
+
+            << "Valid TS packets: "
+            << stats.validTsPackets << '\n'
+
+            << "Invalid TS packets: "
+            << stats.invalidTsPackets << '\n'
+
+            << "Transport errors: "
+            << stats.transportErrors << '\n'
+
+            << "Valid PAT sections: "
+            << stats.validPatSections << '\n'
+
+            << "Invalid PAT sections: "
+            << stats.invalidPatSections << '\n'
+
+            << "Valid PMT sections: "
+            << stats.validPmtSections << '\n'
+
+            << "Invalid PMT sections: "
+            << stats.invalidPmtSections << '\n'
+
+            << "Unexpected PMT sections: "
+            << stats.unexpectedPmtSections << '\n'
+
+            << "Forwarded bytes: "
+            << stats.forwardedBytes << '\n'
+
+            << "HLS write errors: "
+            << stats.hlsWriteErrors << '\n'
+
+            << "Receive timeouts: "
+            << stats.receiveTimeouts << '\n';
+
+        std::cout
+            << "===============================\n";
     }
 }
 
 int main()
 {
+    std::signal(SIGINT, handleSignal);
+
+    std::signal(SIGTERM, handleSignal);
+
+    std::signal(SIGPIPE, SIG_IGN);
+
+    std::cout
+        << "IPTV M10 Live HLS Receiver\n\n";
+
     UdpSocket socket;
 
     if (!socket.open(RTP_PORT))
     {
-        std::cerr << "Failed to open UDP port "
-                  << RTP_PORT << '\n';
+        std::cerr
+            << "Failed to open UDP socket\n";
 
         return 1;
     }
 
-    std::cout << "IPTV M10 PAT/PMT Receiver\n";
+    if (!socket.setReceiveTimeout(
+            RECEIVE_TIMEOUT_MS
+        ))
+    {
+        std::cerr
+            << "Failed to configure UDP timeout\n";
 
-    std::cout << "Listening on UDP port "
-              << RTP_PORT << std::endl;
+        return 1;
+    }
+
+    if (!socket.setReceiveBufferSize(
+            RECEIVE_BUFFER_SIZE
+        ))
+    {
+        std::cerr
+            << "Warning: Cannot configure "
+            << "UDP receive buffer\n";
+    }
+
+    HlsConfig hlsConfig{};
+
+    hlsConfig.outputDirectory =
+        "runtime/hls";
+
+    hlsConfig.segmentDurationSeconds = 2;
+
+    hlsConfig.playlistSize = 6;
+
+    hlsConfig.deleteThreshold = 2;
+
+    // Remove files belonging to a previous
+    // prototype playback session.
+
+    std::error_code filesystemError;
+
+    std::filesystem::remove_all(
+        hlsConfig.outputDirectory,
+        filesystemError
+    );
+
+    if (filesystemError)
+    {
+        std::cerr
+            << "Failed to clean HLS directory: "
+            << filesystemError.message()
+            << '\n';
+
+        return 1;
+    }
+
+    HlsSegmenter segmenter;
+
+    if (!segmenter.start(hlsConfig))
+    {
+        std::cerr
+            << "Failed to start HLS segmenter\n";
+
+        return 1;
+    }
 
     PsiSectionAssembler patAssembler(
         TsParser::PAT_PID
@@ -197,58 +360,25 @@ int main()
         PmtTable
     > programTables;
 
-    std::map<
-        std::uint16_t,
-        std::size_t
-    > pidCounts;
+    std::set<
+        std::tuple<
+            std::uint16_t,
+            std::uint8_t,
+            std::uint8_t,
+            bool
+        >
+    > printedPatSections;
 
-    using PatKey = std::tuple<
-        std::uint16_t,
-        std::uint8_t,
-        std::uint8_t,
-        bool
-    >;
+    std::set<
+        std::tuple<
+            std::uint16_t,
+            std::uint16_t,
+            std::uint8_t,
+            bool
+        >
+    > printedPmtSections;
 
-    using PmtKey = std::tuple<
-        std::uint16_t,
-        std::uint16_t,
-        std::uint8_t,
-        bool
-    >;
-
-    std::set<PatKey> printedPatSections;
-
-    std::set<PmtKey> printedPmtSections;
-
-    std::array<std::uint8_t, 65536> buffer{};
-
-    std::size_t validRtpPackets = 0;
-    std::size_t invalidRtpPackets = 0;
-    std::size_t validTsPackets = 0;
-    std::size_t invalidTsPackets = 0;
-    std::size_t transportErrors = 0;
-    std::size_t rtpDiscontinuities = 0;
-
-    std::size_t patPackets = 0;
-    std::size_t validPatSections = 0;
-    std::size_t invalidPatSections = 0;
-
-    std::size_t pmtPackets = 0;
-    std::size_t validPmtSections = 0;
-    std::size_t invalidPmtSections = 0;
-    std::size_t unexpectedPmtSections = 0;
-
-    std::uint16_t previousSequence = 0;
-
-    bool hasPreviousSequence = false;
-
-    std::uint32_t activeSsrc = 0;
-
-    bool hasActiveSsrc = false;
-
-    std::size_t unexpectedSsrcPackets = 0;
-
-    const auto resetAssemblers = [&]()
+    auto resetAssemblers = [&]()
     {
         patAssembler.reset();
 
@@ -258,46 +388,141 @@ int main()
         }
     };
 
-    for (std::size_t i = 0;
-         i < TEST_PACKET_COUNT;
-         ++i)
+    ReceiverStatistics stats{};
+
+    std::array<std::uint8_t, 65536>
+        receiveBuffer{};
+
+    std::array<std::uint8_t, 65536>
+        forwardBuffer{};
+
+    bool hasPreviousSequence = false;
+
+    std::uint16_t previousSequence = 0;
+
+    bool hasActiveSsrc = false;
+
+    std::uint32_t activeSsrc = 0;
+
+    bool signalAvailable = false;
+
+    bool signalLossReported = false;
+
+    bool fatalError = false;
+
+    auto lastValidSignal =
+        std::chrono::steady_clock::now();
+
+    auto lastStatistics =
+        std::chrono::steady_clock::now();
+
+    std::cout
+        << "Listening on UDP port "
+        << RTP_PORT << '\n';
+
+    std::cout
+        << "Waiting for RTP signal...\n";
+
+    std::cout
+        << "Press Ctrl+C to stop\n";
+
+    while (!stopRequested)
     {
-        const ssize_t receivedBytes =
+        const auto now =
+            std::chrono::steady_clock::now();
+
+        if (!segmenter.isRunning())
+        {
+            std::cerr
+                << "FFmpeg process stopped "
+                << "unexpectedly\n";
+
+            fatalError = true;
+
+            break;
+        }
+
+        if (now - lastStatistics >=
+            std::chrono::seconds(
+                STATISTICS_INTERVAL_SECONDS
+            ))
+        {
+            printStatistics(stats);
+
+            lastStatistics = now;
+        }
+
+        if (!signalLossReported &&
+            now - lastValidSignal >=
+                std::chrono::seconds(
+                    SIGNAL_TIMEOUT_SECONDS
+                ))
+        {
+            std::cout
+                << "\n[WARNING] RTP signal "
+                << "not available\n";
+
+            signalAvailable = false;
+
+            signalLossReported = true;
+
+            resetAssemblers();
+        }
+
+        const ssize_t received =
             socket.receive(
-                buffer.data(),
-                buffer.size()
+                receiveBuffer.data(),
+                receiveBuffer.size()
             );
 
-        if (receivedBytes < 0)
+        if (received < 0)
         {
-            std::cerr << "UDP receive error\n";
+            const int receiveError = errno;
 
-            return 1;
+            if (stopRequested)
+            {
+                break;
+            }
+
+            if (receiveError == EINTR)
+            {
+                continue;
+            }
+
+            if (receiveError == EAGAIN ||
+                receiveError == EWOULDBLOCK)
+            {
+                ++stats.receiveTimeouts;
+
+                continue;
+            }
+
+            std::cerr
+                << "UDP receive error\n";
+
+            fatalError = true;
+
+            break;
         }
+
+        ++stats.receivedDatagrams;
 
         RtpPacket rtpPacket{};
 
         if (!RtpParser::parse(
-                buffer.data(),
+                receiveBuffer.data(),
                 static_cast<std::size_t>(
-                    receivedBytes
+                    received
                 ),
-                rtpPacket))
-        {
-            ++invalidRtpPackets;
-
-            resetAssemblers();
-
-            continue;
-        }
-
-        if (rtpPacket.payloadType !=
-            RtpParser::MPEG_TS_PAYLOAD_TYPE ||
+                rtpPacket
+            ) ||
+            rtpPacket.payloadType !=
+                RtpParser::MPEG_TS_PAYLOAD_TYPE ||
             rtpPacket.payloadSize == 0 ||
             rtpPacket.payloadSize %
                 TsParser::PACKET_SIZE != 0)
         {
-            ++invalidRtpPackets;
+            ++stats.invalidRtpPackets;
 
             resetAssemblers();
 
@@ -309,28 +534,45 @@ int main()
             activeSsrc = rtpPacket.ssrc;
 
             hasActiveSsrc = true;
+
+            std::cout
+                << "\nActive RTP SSRC: "
+                << activeSsrc << '\n';
         }
 
         if (rtpPacket.ssrc != activeSsrc)
         {
-            ++unexpectedSsrcPackets;
+            ++stats.unexpectedSsrcPackets;
 
             continue;
         }
 
-        ++validRtpPackets;
+        ++stats.validRtpPackets;
+
+        if (!signalAvailable)
+        {
+            std::cout
+                << "\n[INFO] RTP signal available\n";
+
+            signalAvailable = true;
+
+            signalLossReported = false;
+        }
+
+        lastValidSignal =
+            std::chrono::steady_clock::now();
 
         if (hasPreviousSequence)
         {
-            const std::uint16_t expectedSequence =
+            const std::uint16_t expected =
                 static_cast<std::uint16_t>(
                     previousSequence + 1
                 );
 
             if (rtpPacket.sequenceNumber !=
-                expectedSequence)
+                expected)
             {
-                ++rtpDiscontinuities;
+                ++stats.rtpDiscontinuities;
 
                 resetAssemblers();
             }
@@ -341,41 +583,49 @@ int main()
 
         hasPreviousSequence = true;
 
+        std::size_t forwardSize = 0;
+
         for (std::size_t offset = 0;
              offset < rtpPacket.payloadSize;
              offset += TsParser::PACKET_SIZE)
         {
+            const std::uint8_t* tsData =
+                rtpPacket.payload + offset;
+
             TsPacket tsPacket{};
 
             if (!TsParser::parse(
-                    rtpPacket.payload + offset,
+                    tsData,
                     TsParser::PACKET_SIZE,
-                    tsPacket))
+                    tsPacket
+                ))
             {
-                ++invalidTsPackets;
+                ++stats.invalidTsPackets;
 
                 resetAssemblers();
 
                 continue;
             }
 
-            ++validTsPackets;
-
-            ++pidCounts[tsPacket.pid];
+            ++stats.validTsPackets;
 
             if (tsPacket.transportError)
             {
-                ++transportErrors;
+                ++stats.transportErrors;
 
-                if (tsPacket.pid == TsParser::PAT_PID)
+                if (tsPacket.pid ==
+                    TsParser::PAT_PID)
                 {
                     patAssembler.reset();
                 }
 
                 auto assembler =
-                    pmtAssemblers.find(tsPacket.pid);
+                    pmtAssemblers.find(
+                        tsPacket.pid
+                    );
 
-                if (assembler != pmtAssemblers.end())
+                if (assembler !=
+                    pmtAssemblers.end())
                 {
                     assembler->second.reset();
                 }
@@ -383,37 +633,50 @@ int main()
                 continue;
             }
 
-            // PAT processing.
+            // Data flow: preserve the complete
+            // valid 188-byte MPEG-TS packet.
 
-            if (tsPacket.pid == TsParser::PAT_PID)
+            for (std::size_t i = 0;
+                 i < TsParser::PACKET_SIZE;
+                 ++i)
             {
-                ++patPackets;
+                forwardBuffer[forwardSize++] =
+                    tsData[i];
+            }
 
+            // Metadata flow: PAT processing.
+
+            if (tsPacket.pid ==
+                TsParser::PAT_PID)
+            {
                 const auto sections =
                     patAssembler.push(tsPacket);
 
-                for (const auto& section : sections)
+                for (const auto& section :
+                     sections)
                 {
                     PatTable table{};
 
                     if (!PatParser::parse(
                             section.data(),
                             section.size(),
-                            table))
+                            table
+                        ))
                     {
-                        ++invalidPatSections;
+                        ++stats.invalidPatSections;
 
                         continue;
                     }
 
-                    ++validPatSections;
+                    ++stats.validPatSections;
 
-                    const PatKey key{
-                        table.transportStreamId,
-                        table.versionNumber,
-                        table.sectionNumber,
-                        table.currentNextIndicator
-                    };
+                    const auto key =
+                        std::make_tuple(
+                            table.transportStreamId,
+                            table.versionNumber,
+                            table.sectionNumber,
+                            table.currentNextIndicator
+                        );
 
                     if (printedPatSections
                             .insert(key).second)
@@ -434,19 +697,19 @@ int main()
                                 program.programNumber
                             );
 
-                        if (previous != programs.end() &&
-                            previous->second != program.pmtPid)
+                        if (previous !=
+                                programs.end() &&
+                            previous->second !=
+                                program.pmtPid)
                         {
                             programTables.erase(
                                 program.programNumber
                             );
                         }
 
-                        programs[program.programNumber] =
-                            program.pmtPid;
-
-                        // Create an assembler only when
-                        // the PMT PID is discovered.
+                        programs[
+                            program.programNumber
+                        ] = program.pmtPid;
 
                         pmtAssemblers.try_emplace(
                             program.pmtPid,
@@ -458,246 +721,130 @@ int main()
                 continue;
             }
 
-            // PMT processing.
+            // Metadata flow: PMT processing.
 
             auto assembler =
-                pmtAssemblers.find(tsPacket.pid);
+                pmtAssemblers.find(
+                    tsPacket.pid
+                );
 
-            if (assembler == pmtAssemblers.end())
+            if (assembler ==
+                pmtAssemblers.end())
             {
                 continue;
             }
 
-            ++pmtPackets;
-
             const auto sections =
                 assembler->second.push(tsPacket);
 
-            for (const auto& section : sections)
+            for (const auto& section :
+                 sections)
             {
                 PmtTable table{};
 
                 if (!PmtParser::parse(
                         section.data(),
                         section.size(),
-                        table))
+                        table
+                    ))
                 {
-                    ++invalidPmtSections;
+                    ++stats.invalidPmtSections;
 
                     continue;
                 }
 
                 const auto program =
-                    programs.find(table.programNumber);
+                    programs.find(
+                        table.programNumber
+                    );
 
                 if (program == programs.end() ||
                     program->second != tsPacket.pid)
                 {
-                    ++unexpectedPmtSections;
+                    ++stats.unexpectedPmtSections;
 
                     continue;
                 }
 
-                ++validPmtSections;
+                ++stats.validPmtSections;
 
-                const PmtKey key{
-                    table.programNumber,
-                    tsPacket.pid,
-                    table.versionNumber,
-                    table.currentNextIndicator
-                };
+                const auto key =
+                    std::make_tuple(
+                        table.programNumber,
+                        tsPacket.pid,
+                        table.versionNumber,
+                        table.currentNextIndicator
+                    );
 
                 if (printedPmtSections
                         .insert(key).second)
                 {
-                    printPmt(table, tsPacket.pid);
+                    printPmt(
+                        tsPacket.pid,
+                        table
+                    );
                 }
 
                 if (table.currentNextIndicator)
                 {
-                    programTables[table.programNumber] =
-                        table;
+                    programTables[
+                        table.programNumber
+                    ] = table;
                 }
             }
         }
+
+        // Forward MPEG-TS without the RTP header.
+
+        if (forwardSize > 0)
+        {
+            if (!segmenter.write(
+                    forwardBuffer.data(),
+                    forwardSize
+                ))
+            {
+                ++stats.hlsWriteErrors;
+
+                std::cerr
+                    << "Failed to forward "
+                    << "MPEG-TS to HLS segmenter\n";
+
+                fatalError = true;
+
+                break;
+            }
+
+            stats.forwardedBytes += forwardSize;
+        }
     }
 
     std::cout
-        << "\n========== PAT/PMT TEST SUMMARY ==========\n";
+        << "\nStopping IPTV receiver...\n";
 
-    std::cout << "Received RTP datagrams: "
-              << TEST_PACKET_COUNT << '\n';
+    socket.close();
 
-    std::cout << "Valid RTP packets: "
-              << validRtpPackets << '\n';
+    segmenter.stop();
 
-    std::cout << "Invalid RTP packets: "
-              << invalidRtpPackets << '\n';
+    printStatistics(stats);
 
-    std::cout << "Unexpected SSRC packets: "
-              << unexpectedSsrcPackets << '\n';
+    std::cout
+        << "Detected programs: "
+        << programs.size() << '\n';
 
-    std::cout << "RTP sequence discontinuities: "
-              << rtpDiscontinuities << '\n';
+    std::cout
+        << "Resolved PMT tables: "
+        << programTables.size() << '\n';
 
-    std::cout << "Valid TS packets: "
-              << validTsPackets << '\n';
-
-    std::cout << "Invalid TS packets: "
-              << invalidTsPackets << '\n';
-
-    std::cout << "Transport errors: "
-              << transportErrors << '\n';
-
-    std::cout << "PAT packets: "
-              << patPackets << '\n';
-
-    std::cout << "Valid PAT sections: "
-              << validPatSections << '\n';
-
-    std::cout << "Invalid PAT sections: "
-              << invalidPatSections << '\n';
-
-    std::cout << "PMT packets: "
-              << pmtPackets << '\n';
-
-    std::cout << "Valid PMT sections: "
-              << validPmtSections << '\n';
-
-    std::cout << "Invalid PMT sections: "
-              << invalidPmtSections << '\n';
-
-    std::cout << "Unexpected PMT sections: "
-              << unexpectedPmtSections << '\n';
-
-    std::cout << "Detected programs: "
-              << programs.size() << '\n';
-
-    std::cout << "Resolved PMT tables: "
-              << programTables.size() << '\n';
-
-    bool allProgramsResolved =
-        !programs.empty();
-
-    bool allProgramsHaveAudioVideo =
-        !programs.empty();
-
-    for (const auto& [programNumber, pmtPid] :
-         programs)
+    if (fatalError)
     {
-        std::cout << "\nProgram "
-                  << programNumber << '\n';
+        std::cerr
+            << "Receiver stopped due to error\n";
 
-        std::cout << "  PMT PID: ";
-
-        printPid(pmtPid);
-
-        std::cout << '\n';
-
-        const auto table =
-            programTables.find(programNumber);
-
-        if (table == programTables.end())
-        {
-            std::cout << "  PMT not resolved\n";
-
-            allProgramsResolved = false;
-
-            allProgramsHaveAudioVideo = false;
-
-            continue;
-        }
-
-        std::cout << "  PCR PID: ";
-
-        printPid(table->second.pcrPid);
-
-        std::cout << '\n';
-
-        bool hasVideo = false;
-
-        bool hasAudio = false;
-
-        for (const auto& stream :
-             table->second.streams)
-        {
-            std::cout
-                << "  "
-                << PmtParser::categoryName(
-                       stream.category
-                   )
-                << " PID: ";
-
-            printPid(stream.elementaryPid);
-
-            std::cout
-                << " - "
-                << PmtParser::streamTypeName(
-                       stream.streamType
-                   )
-                << '\n';
-
-            if (stream.category ==
-                StreamCategory::Video)
-            {
-                hasVideo = true;
-            }
-
-            if (stream.category ==
-                StreamCategory::Audio)
-            {
-                hasAudio = true;
-            }
-        }
-
-        if (!hasVideo || !hasAudio)
-        {
-            allProgramsHaveAudioVideo = false;
-        }
-    }
-
-    std::cout << "\nDetected PID statistics:\n";
-
-    for (const auto& [pid, count] : pidCounts)
-    {
-        std::cout << "PID ";
-
-        printPid(pid);
-
-        std::cout << ": "
-                  << count << " packets\n";
-    }
-
-    const bool success =
-        invalidRtpPackets == 0 &&
-        invalidTsPackets == 0 &&
-        unexpectedSsrcPackets == 0 &&
-        transportErrors == 0 &&
-        invalidPatSections == 0 &&
-        invalidPmtSections == 0 &&
-        unexpectedPmtSections == 0 &&
-        validPatSections > 0 &&
-        validPmtSections > 0 &&
-        allProgramsResolved &&
-        allProgramsHaveAudioVideo;
-
-    std::cout << "\nResult: ";
-
-    if (!success)
-    {
-        std::cout << "FAIL\n";
-    }
-    else if (rtpDiscontinuities > 0)
-    {
-        std::cout << "PASS WITH WARNINGS\n";
-    }
-    else
-    {
-        std::cout << "PASS\n";
+        return 1;
     }
 
     std::cout
-        << "==========================================\n";
+        << "Receiver stopped successfully\n";
 
-    return success ? 0 : 1;
+    return 0;
 }

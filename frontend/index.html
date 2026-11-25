@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>IPTV M10 - Live TV Prototype</title>
+
+    <link rel="stylesheet" href="style.css">
+
+</head>
+
+<body>
+
+    <main class="player-container">
+
+        <h1>IPTV M10</h1>
+
+        <p class="subtitle">
+            Live TV Playback Prototype
+        </p>
+
+        <video
+            id="video"
+            controls
+            playsinline
+            preload="none">
+        </video>
+
+        <div class="controls">
+
+            <button id="start-button">
+                Start playback
+            </button>
+
+            <button id="stop-button">
+                Stop playback
+            </button>
+
+        </div>
+
+        <div class="information">
+
+            <p>
+                Status:
+                <span id="status">Idle</span>
+            </p>
+
+            <p>
+                Source:
+                <span id="source">
+                    /runtime/hls/index.m3u8
+                </span>
+            </p>
+
+            <p>
+                Playback time:
+                <span id="playback-time">0.00 s</span>
+            </p>
+
+            <p>
+                Resolution:
+                <span id="resolution">Unknown</span>
+            </p>
+
+        </div>
+
+    </main>
+
+    <script src="node_modules/hls.js/dist/hls.min.js">
+    </script>
+
+    <script src="player.js"></script>
+
+</body>
+
+</html>
