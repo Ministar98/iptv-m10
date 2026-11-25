@@ -54,6 +54,6 @@ exec ffmpeg \
     -map 0:v:0 \
     -map 0:a:0 \
     -c copy \
-    -mpegts_service_id "${CHANNEL_ID}" \
+    -mpegts_muxer_options "mpegts_service_id=${CHANNEL_ID}" \
     -f rtp_mpegts \
     "rtp://${DESTINATION_IP}:${DESTINATION_PORT}?pkt_size=1328"
