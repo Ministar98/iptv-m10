@@ -30,11 +30,12 @@ target_compile_options(iptv_ts PRIVATE
     -Wpedantic
 )
 
-# PSI and PAT library
+# PSI library
 
 add_library(iptv_psi STATIC
     src/PsiSectionAssembler.cpp
     src/PatParser.cpp
+    src/PmtParser.cpp
 )
 
 target_include_directories(iptv_psi PUBLIC
@@ -171,5 +172,31 @@ add_test(
 
 set_tests_properties(
     pat_parser_unit_test
+    PROPERTIES TIMEOUT 5
+)
+
+# PMT parser tests
+
+add_executable(pmt_parser_test
+    tests/PmtParserTest.cpp
+)
+
+target_link_libraries(pmt_parser_test PRIVATE
+    iptv_psi
+)
+
+target_compile_options(pmt_parser_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME pmt_parser_unit_test
+    COMMAND pmt_parser_test
+)
+
+set_tests_properties(
+    pmt_parser_unit_test
     PROPERTIES TIMEOUT 5
 )
