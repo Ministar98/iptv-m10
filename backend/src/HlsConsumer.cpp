@@ -19,7 +19,7 @@ HlsConsumer::HlsConsumer(
 
 bool HlsConsumer::initialize()
 {
-    if (initialized_ || hasFatalError())
+    if (initialized_ || hasFatalError() || isFinished())
     {
         return false;
     }
@@ -62,6 +62,12 @@ bool HlsConsumer::initialize()
         fail("Failed to start HLS segmenter");
 
         return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+
+        publishedInterval_ = BufferInterval{};
     }
 
     initialized_ = true;
@@ -168,11 +174,7 @@ void HlsConsumer::run()
         fail("Unknown HLS consumer exception");
     }
 
-    // Close the input pipe and finalize FFmpeg output.
-
     segmenter_.stop();
-
-    // Import the final segment and ENDLIST after FFmpeg exits.
 
     if (!hasFatalError())
     {
@@ -218,16 +220,12 @@ bool HlsConsumer::processBlock(
         }
     }
 
-    // Preserve MPEG-TS packet alignment.
-
     if (block.empty() || block.size() % 188 != 0)
     {
         fail("Invalid MPEG-TS block received by consumer");
 
         return false;
     }
-
-    // No statistics mutex is held during pipe I/O.
 
     if (!segmenter_.write(
             block.data.data(),
@@ -313,6 +311,23 @@ bool HlsConsumer::updateBuffer()
         const auto segments =
             manager_.buffer().segments();
 
+        BufferInterval interval{};
+
+        if (!segments.empty())
+        {
+            interval.available = true;
+
+            interval.startTimeMs =
+                segments.front().startTimeMs;
+
+            interval.endTimeMs =
+                segments.back().endTimeMs();
+
+            interval.durationMs =
+                interval.endTimeMs -
+                interval.startTimeMs;
+        }
+
         const bool published =
             HlsPlaylistWriter::write(
                 hlsConfig_.outputDirectory /
@@ -344,6 +359,8 @@ bool HlsConsumer::updateBuffer()
         {
             std::lock_guard<std::mutex>
                 lock(stateMutex_);
+
+            publishedInterval_ = interval;
 
             ++statistics_.playlistUpdates;
 
@@ -419,6 +436,14 @@ HlsConsumerStatistics HlsConsumer::statistics() const
         lock(stateMutex_);
 
     return statistics_;
+}
+
+BufferInterval HlsConsumer::publishedInterval() const
+{
+    std::lock_guard<std::mutex>
+        lock(stateMutex_);
+
+    return publishedInterval_;
 }
 
 std::string HlsConsumer::lastError() const

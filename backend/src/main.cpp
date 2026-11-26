@@ -1,6 +1,7 @@
 #include "BoundedTsQueue.hpp"
 #include "RtpProducer.hpp"
 #include "HlsConsumer.hpp"
+#include "PlaybackManager.hpp"
 
 #include <chrono>
 #include <csignal>
@@ -8,6 +9,7 @@
 #include <exception>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 
 namespace
@@ -18,8 +20,9 @@ constexpr std::uint16_t RTP_PORT = 5004;
 constexpr std::size_t QUEUE_MAX_BYTES =
     8U * 1024U * 1024U;
 
-constexpr std::size_t QUEUE_MAX_BLOCKS =
-    4096U;
+constexpr std::size_t QUEUE_MAX_BLOCKS = 4096U;
+
+constexpr std::uint64_t GENERATION_ID = 1;
 
 constexpr std::chrono::milliseconds
     CONTROL_INTERVAL{100};
@@ -37,17 +40,14 @@ void handleSignal(int)
 void printStatistics(
     const RtpProducer& producer,
     const HlsConsumer& consumer,
-    const BoundedTsQueue& queue
+    const BoundedTsQueue& queue,
+    const PlaybackManager& playback
 )
 {
-    const auto producerStats =
-        producer.statistics();
-
-    const auto consumerStats =
-        consumer.statistics();
-
-    const auto queueStats =
-        queue.statistics();
+    const auto producerStats = producer.statistics();
+    const auto consumerStats = consumer.statistics();
+    const auto queueStats = queue.statistics();
+    const auto playbackStats = playback.snapshot();
 
     std::ostringstream output;
 
@@ -120,9 +120,7 @@ void printStatistics(
         << producerStats.receiveErrors << '\n'
 
         << "Signal available: "
-        << (producerStats.signalAvailable
-                ? "YES"
-                : "NO")
+        << (producerStats.signalAvailable ? "YES" : "NO")
         << '\n'
 
         << "\n--- Bounded TS Queue ---\n"
@@ -222,9 +220,74 @@ void printStatistics(
         << "Total registered bytes: "
         << consumerStats.totalStorageBytes << '\n'
 
+        << "\n--- Playback Manager ---\n"
+
+        << "Playback state: "
+        << playbackStateToString(playbackStats.state)
+        << '\n'
+
+        << "Generation ID: "
+        << playbackStats.generationId << '\n'
+
+        << "Buffer available: "
+        << (playbackStats.bufferAvailable ? "YES" : "NO")
+        << '\n'
+
+        << "Oldest position ms: "
+        << playbackStats.oldestPositionMs << '\n'
+
+        << "Live position ms: "
+        << playbackStats.livePositionMs << '\n'
+
+        << "Playback position ms: "
+        << playbackStats.playbackPositionMs << '\n'
+
+        << "Published buffer duration ms: "
+        << playbackStats.bufferDurationMs << '\n'
+
+        << "Delay from live ms: "
+        << playbackStats.delayFromLiveMs << '\n'
+
+        << "Position in buffer ms: "
+        << playbackStats.positionInBufferMs << '\n'
+
+        << "At live edge: "
+        << (playbackStats.atLiveEdge ? "YES" : "NO")
+        << '\n'
+
+        << "Position expired: "
+        << (playbackStats.positionExpired ? "YES" : "NO")
+        << '\n'
+
+        << "Seek required: "
+        << (playbackStats.seekRequired ? "YES" : "NO")
+        << '\n'
+
+        << "Seek revision: "
+        << playbackStats.seekRevision << '\n'
+
+        << "Playback error: "
+        << (
+            playbackStats.errorMessage.empty()
+                ? "NONE"
+                : playbackStats.errorMessage
+        )
+        << '\n'
+
         << "=====================================\n";
 
     std::cout << output.str();
+}
+
+bool synchronizePlayback(
+    const HlsConsumer& consumer,
+    PlaybackManager& playback
+)
+{
+    return playback.updateBufferInterval(
+        GENERATION_ID,
+        consumer.publishedInterval()
+    );
 }
 
 } // namespace
@@ -238,32 +301,19 @@ int main()
     std::cout
         << "IPTV M10 Producer-Consumer Receiver\n\n";
 
-    // Shared bounded queue.
-
     BoundedTsQueue queue(
         QUEUE_MAX_BYTES,
         QUEUE_MAX_BLOCKS
     );
 
-    // HLS configuration.
-
     HlsConfig hlsConfig{};
 
-    hlsConfig.outputDirectory =
-        "runtime/hls";
-
+    hlsConfig.outputDirectory = "runtime/hls";
     hlsConfig.segmentDurationSeconds = 2;
-
     hlsConfig.playlistSize = 60;
-
     hlsConfig.deleteThreshold = 2;
-
-    hlsConfig.playlistFilename =
-        "producer.m3u8";
-
+    hlsConfig.playlistFilename = "producer.m3u8";
     hlsConfig.deleteSegments = false;
-
-    // Circular disk buffer configuration.
 
     BufferConfig bufferConfig{};
 
@@ -276,8 +326,6 @@ int main()
     bufferConfig.maxDurationMs =
         30ULL * 60ULL * 1000ULL;
 
-    // Worker components.
-
     RtpProducer producer(
         queue,
         RTP_PORT
@@ -289,10 +337,14 @@ int main()
         bufferConfig
     );
 
-    // Initialize UDP socket.
+    PlaybackManager playback(2000);
+
+    playback.reset(GENERATION_ID);
 
     if (!producer.initialize())
     {
+        playback.setError(producer.lastError());
+
         std::cerr
             << "Failed to initialize RTP producer: "
             << producer.lastError() << '\n';
@@ -300,10 +352,10 @@ int main()
         return 1;
     }
 
-    // Start FFmpeg before creating worker threads.
-
     if (!consumer.initialize())
     {
+        playback.setError(consumer.lastError());
+
         std::cerr
             << "Failed to initialize HLS consumer: "
             << consumer.lastError() << '\n';
@@ -318,7 +370,19 @@ int main()
 
     try
     {
-        // Start consumer first.
+        if (!playback.start())
+        {
+            throw std::runtime_error(
+                "Failed to start Playback Manager"
+            );
+        }
+
+        std::cout
+            << "[INFO] Playback Manager started: "
+            << playbackStateToString(
+                playback.snapshot().state
+            )
+            << '\n';
 
         consumerThread = std::thread(
             &HlsConsumer::run,
@@ -341,15 +405,23 @@ int main()
         auto lastStatistics =
             std::chrono::steady_clock::now();
 
-        // Main thread coordinates the workers.
-
         while (!stopRequested)
         {
-            if (
-                producer.hasFatalError() ||
-                consumer.hasFatalError()
-            )
+            if (producer.hasFatalError())
             {
+                playback.setError(
+                    producer.lastError()
+                );
+
+                break;
+            }
+
+            if (consumer.hasFatalError())
+            {
+                playback.setError(
+                    consumer.lastError()
+                );
+
                 break;
             }
 
@@ -360,9 +432,27 @@ int main()
             {
                 coordinatorError = true;
 
+                playback.setError(
+                    "Worker finished unexpectedly"
+                );
+
                 std::cerr
                     << "[ERROR] Worker finished "
                     << "unexpectedly\n";
+
+                break;
+            }
+
+            if (!synchronizePlayback(
+                    consumer,
+                    playback
+                ))
+            {
+                coordinatorError = true;
+
+                playback.setError(
+                    "Invalid published buffer interval"
+                );
 
                 break;
             }
@@ -378,7 +468,8 @@ int main()
                 printStatistics(
                     producer,
                     consumer,
-                    queue
+                    queue,
+                    playback
                 );
 
                 lastStatistics = now;
@@ -393,6 +484,8 @@ int main()
     {
         coordinatorError = true;
 
+        playback.setError(error.what());
+
         std::cerr
             << "[ERROR] Coordinator exception: "
             << error.what() << '\n';
@@ -401,11 +494,13 @@ int main()
     {
         coordinatorError = true;
 
+        playback.setError(
+            "Unknown coordinator exception"
+        );
+
         std::cerr
             << "[ERROR] Unknown coordinator exception\n";
     }
-
-    // Shutdown sequence.
 
     std::cout
         << "\n[INFO] Stopping IPTV receiver...\n";
@@ -421,14 +516,10 @@ int main()
         queue.abort();
     }
 
-    // Stop producer before closing the queue.
-
     if (producerThread.joinable())
     {
         producerThread.join();
     }
-
-    // Wake consumer and allow remaining data to drain.
 
     queue.close();
 
@@ -437,16 +528,24 @@ int main()
         consumerThread.join();
     }
 
-    // Both worker threads have finished.
+    if (!synchronizePlayback(
+            consumer,
+            playback
+        ))
+    {
+        coordinatorError = true;
 
-    printStatistics(
-        producer,
-        consumer,
-        queue
-    );
+        playback.setError(
+            "Invalid final buffer interval"
+        );
+    }
 
     if (producer.hasFatalError())
     {
+        playback.setError(
+            producer.lastError()
+        );
+
         std::cerr
             << "[ERROR] Producer: "
             << producer.lastError() << '\n';
@@ -454,16 +553,33 @@ int main()
 
     if (consumer.hasFatalError())
     {
+        playback.setError(
+            consumer.lastError()
+        );
+
         std::cerr
             << "[ERROR] Consumer: "
             << consumer.lastError() << '\n';
     }
 
-    if (
+    const bool failed =
         coordinatorError ||
         producer.hasFatalError() ||
-        consumer.hasFatalError()
-    )
+        consumer.hasFatalError();
+
+    if (!failed)
+    {
+        playback.stop();
+    }
+
+    printStatistics(
+        producer,
+        consumer,
+        queue,
+        playback
+    );
+
+    if (failed)
     {
         std::cerr
             << "Receiver stopped due to error\n";

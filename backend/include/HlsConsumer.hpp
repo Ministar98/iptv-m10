@@ -46,10 +46,8 @@ public:
     HlsConsumer(const HlsConsumer&) = delete;
     HlsConsumer& operator=(const HlsConsumer&) = delete;
 
-    // Must be called before worker threads are started.
     bool initialize();
 
-    // Executed exclusively by the consumer thread.
     void run();
 
     bool hasFatalError() const noexcept;
@@ -57,6 +55,8 @@ public:
     bool isFinished() const noexcept;
 
     HlsConsumerStatistics statistics() const;
+
+    BufferInterval publishedInterval() const;
 
     std::string lastError() const;
 
@@ -82,6 +82,8 @@ private:
     mutable std::mutex stateMutex_;
 
     HlsConsumerStatistics statistics_{};
+
+    BufferInterval publishedInterval_{};
 
     std::string lastError_;
 

@@ -585,3 +585,76 @@ target_link_libraries(iptv_backend PRIVATE
     iptv_ts_queue
     Threads::Threads
 )
+# Playback Manager
+
+add_library(iptv_playback STATIC
+    src/PlaybackManager.cpp
+)
+
+target_include_directories(iptv_playback PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_playback PUBLIC
+    Threads::Threads
+)
+
+target_compile_options(iptv_playback PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# Playback Manager tests
+
+add_executable(playback_manager_test
+    tests/PlaybackManagerTest.cpp
+)
+
+target_link_libraries(playback_manager_test PRIVATE
+    iptv_playback
+)
+
+target_compile_options(playback_manager_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME playback_manager_unit_test
+    COMMAND playback_manager_test
+)
+
+set_tests_properties(
+    playback_manager_unit_test
+    PROPERTIES TIMEOUT 10
+)
+# Playback control tests
+
+add_executable(playback_manager_control_test
+    tests/PlaybackManagerControlTest.cpp
+)
+
+target_link_libraries(playback_manager_control_test PRIVATE
+    iptv_playback
+    Threads::Threads
+)
+
+target_compile_options(playback_manager_control_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME playback_manager_control_unit_test
+    COMMAND playback_manager_control_test
+)
+
+set_tests_properties(
+    playback_manager_control_unit_test
+    PROPERTIES TIMEOUT 10
+)
+target_link_libraries(iptv_backend PRIVATE
+    iptv_playback
+)

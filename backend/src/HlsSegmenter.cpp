@@ -144,7 +144,21 @@ bool HlsSegmenter::start(
 
     if (childPid == 0)
     {
-        // Child process.
+        // Isolate FFmpeg from terminal signals.
+
+        if (::setsid() < 0)
+        {
+            constexpr char message[] =
+                "Failed to isolate FFmpeg process\n";
+
+            ::write(
+                STDERR_FILENO,
+                message,
+                sizeof(message) - 1
+            );
+
+            ::_exit(126);
+        }
 
         ::close(pipeFds[1]);
 
@@ -171,8 +185,6 @@ bool HlsSegmenter::start(
                 ::_exit(126);
             }
         }
-
-        // Parent controls process shutdown.
 
         ::signal(SIGINT, SIG_IGN);
         ::signal(SIGTERM, SIG_DFL);
@@ -224,30 +236,19 @@ bool HlsSegmenter::start(
         ::_exit(127);
     }
 
-    // Parent process.
-
     ::close(pipeFds[0]);
 
     inputFd_ = pipeFds[1];
-
     processId_ = childPid;
 
     std::cout
-        << "HLS segmenter started\n";
-
-    std::cout
+        << "HLS segmenter started\n"
         << "FFmpeg PID: "
-        << processId_ << '\n';
-
-    std::cout
+        << processId_ << '\n'
         << "HLS output: "
-        << config.outputDirectory << '\n';
-
-    std::cout
+        << config.outputDirectory << '\n'
         << "HLS playlist: "
-        << config.playlistFilename << '\n';
-
-    std::cout
+        << config.playlistFilename << '\n'
         << "Automatic segment deletion: "
         << (config.deleteSegments
                 ? "ENABLED"
@@ -264,9 +265,16 @@ bool HlsSegmenter::write(
 {
     if (data == nullptr ||
         size == 0 ||
-        inputFd_ < 0 ||
-        !isRunning())
+        inputFd_ < 0)
     {
+        return false;
+    }
+
+    if (!isRunning())
+    {
+        std::cerr
+            << "FFmpeg process is not running\n";
+
         return false;
     }
 
@@ -319,7 +327,6 @@ bool HlsSegmenter::write(
             pollfd descriptor{};
 
             descriptor.fd = inputFd_;
-
             descriptor.events = POLLOUT;
 
             const auto remaining =
@@ -357,8 +364,15 @@ bool HlsSegmenter::write(
             continue;
         }
 
+        const int writeError = errno;
+
         std::cerr
-            << "Failed to write MPEG-TS data\n";
+            << "Failed to write MPEG-TS data: "
+            << std::error_code(
+                writeError,
+                std::generic_category()
+            ).message()
+            << '\n';
 
         return false;
     }
@@ -371,7 +385,6 @@ void HlsSegmenter::closeInput()
     if (inputFd_ >= 0)
     {
         ::close(inputFd_);
-
         inputFd_ = -1;
     }
 }
@@ -403,8 +416,31 @@ bool HlsSegmenter::isRunning()
         return true;
     }
 
-    if (result == processId_ ||
-        (result < 0 && errno == ECHILD))
+    if (result == processId_)
+    {
+        if (WIFEXITED(status))
+        {
+            std::cout
+                << "FFmpeg exit code: "
+                << WEXITSTATUS(status)
+                << '\n';
+        }
+        else if (WIFSIGNALED(status))
+        {
+            std::cerr
+                << "FFmpeg terminated by signal: "
+                << WTERMSIG(status)
+                << '\n';
+        }
+
+        processId_ = -1;
+
+        closeInput();
+
+        return false;
+    }
+
+    if (result < 0 && errno == ECHILD)
     {
         processId_ = -1;
 
@@ -416,8 +452,6 @@ bool HlsSegmenter::isRunning()
 
 void HlsSegmenter::stop()
 {
-    // EOF allows FFmpeg to finalize its output.
-
     closeInput();
 
     if (processId_ <= 0)
@@ -425,7 +459,7 @@ void HlsSegmenter::stop()
         return;
     }
 
-    // Wait up to three seconds for normal exit.
+    // Wait for normal EOF shutdown.
 
     for (int i = 0; i < 30; ++i)
     {
@@ -439,7 +473,8 @@ void HlsSegmenter::stop()
         );
     }
 
-    // Request termination.
+    std::cerr
+        << "FFmpeg shutdown timeout, sending SIGTERM\n";
 
     ::kill(processId_, SIGTERM);
 
@@ -455,7 +490,8 @@ void HlsSegmenter::stop()
         );
     }
 
-    // Last resort.
+    std::cerr
+        << "FFmpeg termination timeout, sending SIGKILL\n";
 
     ::kill(processId_, SIGKILL);
 
