@@ -21,6 +21,13 @@ h1 {
     margin-bottom: 5px;
 }
 
+h2 {
+    margin-top: 0;
+    margin-bottom: 15px;
+
+    font-size: 20px;
+}
+
 .subtitle {
     color: #a0a0a0;
     margin-bottom: 25px;
@@ -40,6 +47,8 @@ video {
 
 .controls {
     display: flex;
+    flex-wrap: wrap;
+
     gap: 15px;
 
     margin-top: 20px;
@@ -81,3 +90,83 @@ button:focus-visible {
 #status {
     color: #72d572;
 }
+
+.metrics-grid {
+    display: grid;
+
+    grid-template-columns:
+        repeat(auto-fit, minmax(200px, 1fr));
+
+    gap: 12px;
+}
+
+.metric {
+    display: flex;
+    flex-direction: column;
+
+    gap: 10px;
+
+    padding: 15px;
+
+    background: #272c35;
+
+    border: 1px solid #383e48;
+    border-radius: 6px;
+}
+
+.metric-label {
+    color: #b0b5bf;
+
+    font-size: 14px;
+}
+
+.metric-value {
+    color: #ffffff;
+
+    font-size: 22px;
+    font-weight: bold;
+
+    font-variant-numeric: tabular-nums;
+}
+
+.mode-live {
+    color: #72d572;
+}
+
+.mode-timeshift {
+    color: #ffbf69;
+}
+
+.mode-paused {
+    color: #79b8ff;
+}
+
+.mode-expired {
+    color: #ff7777;
+}
+
+@media (max-width: 600px) {
+
+    body {
+        padding: 15px;
+    }
+
+    .metrics-grid {
+        grid-template-columns: 1fr;
+    }
+}
+button:disabled {
+    opacity: 0.4;
+
+    cursor: not-allowed;
+}
+
+button:disabled:hover {
+    background: #303640;
+}
+
+#timeline { display: block; width: 100%; margin: 15px 0; accent-color: #72d572; }
+.timeline-labels { display: flex; justify-content: space-between; margin-bottom: 15px; }
+#seek-position { width: 110px; padding: 8px; margin: 8px; }
+.information label { margin-right: 10px; }
+.mode-seeking { color: #79b8ff; }

@@ -12,7 +12,7 @@ struct HlsConfig
 
     unsigned int segmentDurationSeconds = 2;
 
-    unsigned int playlistSize = 6;
+    unsigned int playlistSize = 60;
 
     unsigned int deleteThreshold = 2;
 };

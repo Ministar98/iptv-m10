@@ -307,7 +307,7 @@ int main()
 
     hlsConfig.segmentDurationSeconds = 2;
 
-    hlsConfig.playlistSize = 6;
+    hlsConfig.playlistSize = 60;
 
     hlsConfig.deleteThreshold = 2;
 
