@@ -658,3 +658,103 @@ set_tests_properties(
 target_link_libraries(iptv_backend PRIVATE
     iptv_playback
 )
+# Service Manager library
+
+add_library(iptv_service STATIC
+    src/ServiceManager.cpp
+)
+
+target_include_directories(iptv_service PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(iptv_service PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+# Service Manager tests
+
+add_executable(service_manager_test
+    tests/ServiceManagerTest.cpp
+)
+
+target_link_libraries(service_manager_test PRIVATE
+    iptv_service
+)
+
+target_compile_options(service_manager_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME service_manager_unit_test
+    COMMAND service_manager_test
+)
+
+set_tests_properties(
+    service_manager_unit_test
+    PROPERTIES TIMEOUT 5
+)
+# Session management library
+
+add_library(iptv_session STATIC
+    src/ActiveSession.cpp
+    src/SessionController.cpp
+    src/HeadendController.cpp
+)
+
+target_include_directories(iptv_session PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_session PUBLIC
+    iptv_service
+    iptv_ts_queue
+    iptv_rtp_producer
+    iptv_hls_consumer
+    iptv_playback
+    Threads::Threads
+)
+
+target_compile_options(iptv_session PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# Headend Controller integration test
+
+add_executable(headend_controller_test
+    tests/HeadendControllerTest.cpp
+)
+
+target_link_libraries(headend_controller_test PRIVATE
+    iptv_session
+)
+
+target_compile_options(headend_controller_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+target_link_libraries(iptv_backend PRIVATE
+    iptv_session
+)
+# Session Controller integration test
+
+add_executable(session_controller_test
+    tests/SessionControllerTest.cpp
+)
+
+target_link_libraries(session_controller_test PRIVATE
+    iptv_session
+)
+
+target_compile_options(session_controller_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)

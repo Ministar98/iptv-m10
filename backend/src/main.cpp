@@ -1,312 +1,498 @@
-#include "BoundedTsQueue.hpp"
-#include "RtpProducer.hpp"
-#include "HlsConsumer.hpp"
-#include "PlaybackManager.hpp"
+#include "SessionController.hpp"
 
+#include <cerrno>
 #include <chrono>
 #include <csignal>
-#include <cstdint>
 #include <exception>
 #include <iostream>
 #include <sstream>
-#include <stdexcept>
-#include <thread>
+#include <string>
+
+#include <poll.h>
+#include <unistd.h>
 
 namespace
 {
 
-constexpr std::uint16_t RTP_PORT = 5004;
-
-constexpr std::size_t QUEUE_MAX_BYTES =
-    8U * 1024U * 1024U;
-
-constexpr std::size_t QUEUE_MAX_BLOCKS = 4096U;
-
-constexpr std::uint64_t GENERATION_ID = 1;
-
-constexpr std::chrono::milliseconds
-    CONTROL_INTERVAL{100};
-
-constexpr std::chrono::seconds
-    STATISTICS_INTERVAL{5};
-
 volatile std::sig_atomic_t stopRequested = 0;
 
-void handleSignal(int)
+constexpr auto CONTROL_INTERVAL =
+    std::chrono::milliseconds(100);
+
+constexpr auto STATISTICS_INTERVAL =
+    std::chrono::seconds(5);
+
+void signalHandler(int)
 {
     stopRequested = 1;
 }
 
+void printCommands()
+{
+    std::cout
+        << "\n========== IPTV M10 ==========\n"
+        << "n     - Next channel\n"
+        << "p     - Previous channel\n"
+        << "1-3   - Select channel\n"
+        << "s     - Statistics\n"
+        << "l     - Service list\n"
+        << "h     - Help\n"
+        << "q     - Quit\n"
+        << "==============================\n";
+}
+
+void printServices(const ServiceManager& manager)
+{
+    std::cout << "\n--- TV Services ---\n";
+
+    for (const auto& service : manager.services())
+    {
+        std::cout
+            << service.channelNumber
+            << " - "
+            << service.name
+            << " (Service ID: "
+            << service.serviceId
+            << ")\n";
+    }
+}
+
 void printStatistics(
-    const RtpProducer& producer,
-    const HlsConsumer& consumer,
-    const BoundedTsQueue& queue,
-    const PlaybackManager& playback
+    const SessionController& controller
 )
 {
-    const auto producerStats = producer.statistics();
-    const auto consumerStats = consumer.statistics();
-    const auto queueStats = queue.statistics();
-    const auto playbackStats = playback.snapshot();
+    const auto session = controller.snapshot();
 
-    std::ostringstream output;
+    const auto statistics = controller.statistics();
 
-    output
-        << "\n========== IPTV STATISTICS ==========\n"
+    const auto& playback = session.playback;
 
-        << "\n--- RTP Producer ---\n"
-
-        << "Received datagrams: "
-        << producerStats.receivedDatagrams << '\n'
-
-        << "Valid RTP packets: "
-        << producerStats.validRtpPackets << '\n'
-
-        << "Invalid RTP packets: "
-        << producerStats.invalidRtpPackets << '\n'
-
-        << "Unexpected SSRC packets: "
-        << producerStats.unexpectedSsrcPackets << '\n'
-
-        << "RTP discontinuities: "
-        << producerStats.rtpDiscontinuities << '\n'
-
-        << "Valid TS packets: "
-        << producerStats.validTsPackets << '\n'
-
-        << "Invalid TS packets: "
-        << producerStats.invalidTsPackets << '\n'
-
-        << "Transport errors: "
-        << producerStats.transportErrors << '\n'
-
-        << "Valid PAT sections: "
-        << producerStats.validPatSections << '\n'
-
-        << "Invalid PAT sections: "
-        << producerStats.invalidPatSections << '\n'
-
-        << "Valid PMT sections: "
-        << producerStats.validPmtSections << '\n'
-
-        << "Invalid PMT sections: "
-        << producerStats.invalidPmtSections << '\n'
-
-        << "Unexpected PMT sections: "
-        << producerStats.unexpectedPmtSections << '\n'
-
-        << "Detected programs: "
-        << producerStats.detectedPrograms << '\n'
-
-        << "Resolved PMT tables: "
-        << producerStats.resolvedPmtTables << '\n'
-
-        << "Queued blocks: "
-        << producerStats.queuedBlocks << '\n'
-
-        << "Queued bytes: "
-        << producerStats.queuedBytes << '\n'
-
-        << "Producer dropped blocks: "
-        << producerStats.droppedBlocks << '\n'
-
-        << "Producer dropped bytes: "
-        << producerStats.droppedBytes << '\n'
-
-        << "Receive timeouts: "
-        << producerStats.receiveTimeouts << '\n'
-
-        << "Receive errors: "
-        << producerStats.receiveErrors << '\n'
-
-        << "Signal available: "
-        << (producerStats.signalAvailable ? "YES" : "NO")
+    std::cout
+        << "\n========== IPTV Statistics ==========\n"
+        << "Session state: "
+        << sessionStateToString(session.state)
         << '\n'
-
-        << "\n--- Bounded TS Queue ---\n"
-
-        << "Accepted blocks: "
-        << queueStats.acceptedBlocks << '\n'
-
-        << "Accepted bytes: "
-        << queueStats.acceptedBytes << '\n'
-
-        << "Popped blocks: "
-        << queueStats.poppedBlocks << '\n'
-
-        << "Popped bytes: "
-        << queueStats.poppedBytes << '\n'
-
-        << "Current blocks: "
-        << queueStats.queuedBlocks << '\n'
-
-        << "Current bytes: "
-        << queueStats.queuedBytes << '\n'
-
-        << "Peak blocks: "
-        << queueStats.peakBlocks << '\n'
-
-        << "Peak bytes: "
-        << queueStats.peakBytes << '\n'
-
-        << "Dropped blocks: "
-        << queueStats.droppedBlocks << '\n'
-
-        << "Dropped bytes: "
-        << queueStats.droppedBytes << '\n'
-
-        << "Overflow blocks: "
-        << queueStats.overflowBlocks << '\n'
-
-        << "Invalid blocks: "
-        << queueStats.invalidBlocks << '\n'
-
-        << "Rejected closed blocks: "
-        << queueStats.rejectedClosedBlocks << '\n'
-
-        << "Discarded blocks: "
-        << queueStats.discardedBlocks << '\n'
-
-        << "Queue closed: "
-        << (queueStats.closed ? "YES" : "NO")
-        << '\n'
-
-        << "\n--- HLS Consumer ---\n"
-
-        << "Consumed blocks: "
-        << consumerStats.consumedBlocks << '\n'
-
-        << "Consumed bytes: "
-        << consumerStats.consumedBytes << '\n'
-
-        << "Forwarded blocks: "
-        << consumerStats.forwardedBlocks << '\n'
-
-        << "Forwarded bytes: "
-        << consumerStats.forwardedBytes << '\n'
-
-        << "Discontinuities: "
-        << consumerStats.discontinuities << '\n'
-
-        << "Queue timeouts: "
-        << consumerStats.queueTimeouts << '\n'
-
-        << "HLS write errors: "
-        << consumerStats.writeErrors << '\n'
-
-        << "Buffer update errors: "
-        << consumerStats.bufferUpdateErrors << '\n'
-
-        << "FFmpeg process errors: "
-        << consumerStats.processErrors << '\n'
-
-        << "Playlist updates: "
-        << consumerStats.playlistUpdates << '\n'
-
-        << "Registered segments: "
-        << consumerStats.registeredSegments << '\n'
-
-        << "\n--- Circular Disk Buffer ---\n"
-
-        << "Buffer duration ms: "
-        << consumerStats.buffer.durationMs << '\n'
-
-        << "Active segments: "
-        << consumerStats.buffer.segmentCount << '\n'
-
-        << "Pending deletion: "
-        << consumerStats.pendingDeletionCount << '\n'
-
-        << "Total registered bytes: "
-        << consumerStats.totalStorageBytes << '\n'
-
-        << "\n--- Playback Manager ---\n"
-
-        << "Playback state: "
-        << playbackStateToString(playbackStats.state)
-        << '\n'
-
         << "Generation ID: "
-        << playbackStats.generationId << '\n'
+        << session.generationId
+        << '\n';
 
+    if (session.activeService)
+    {
+        std::cout
+            << "Active service: "
+            << session.activeService->name
+            << '\n'
+            << "Service ID: "
+            << session.activeService->serviceId
+            << '\n'
+            << "Channel number: "
+            << session.activeService->channelNumber
+            << '\n';
+    }
+
+    if (statistics)
+    {
+        const auto& producer = statistics->producer;
+        const auto& queue = statistics->queue;
+        const auto& consumer = statistics->consumer;
+
+        std::cout
+            << "\n--- RTP Producer ---\n"
+            << "Received datagrams: "
+            << producer.receivedDatagrams << '\n'
+            << "Valid RTP packets: "
+            << producer.validRtpPackets << '\n'
+            << "Invalid RTP packets: "
+            << producer.invalidRtpPackets << '\n'
+            << "Unexpected SSRC packets: "
+            << producer.unexpectedSsrcPackets << '\n'
+            << "RTP discontinuities: "
+            << producer.rtpDiscontinuities << '\n'
+            << "Valid TS packets: "
+            << producer.validTsPackets << '\n'
+            << "Invalid TS packets: "
+            << producer.invalidTsPackets << '\n'
+            << "Transport errors: "
+            << producer.transportErrors << '\n'
+            << "Valid PAT sections: "
+            << producer.validPatSections << '\n'
+            << "Invalid PAT sections: "
+            << producer.invalidPatSections << '\n'
+            << "Valid PMT sections: "
+            << producer.validPmtSections << '\n'
+            << "Invalid PMT sections: "
+            << producer.invalidPmtSections << '\n'
+            << "Unexpected PMT sections: "
+            << producer.unexpectedPmtSections << '\n'
+            << "Detected programs: "
+            << producer.detectedPrograms << '\n'
+            << "Resolved PMT tables: "
+            << producer.resolvedPmtTables << '\n'
+            << "Queued blocks: "
+            << producer.queuedBlocks << '\n'
+            << "Queued bytes: "
+            << producer.queuedBytes << '\n'
+            << "Dropped blocks: "
+            << producer.droppedBlocks << '\n'
+            << "Dropped bytes: "
+            << producer.droppedBytes << '\n'
+            << "Receive timeouts: "
+            << producer.receiveTimeouts << '\n'
+            << "Receive errors: "
+            << producer.receiveErrors << '\n'
+            << "Signal available: "
+            << producer.signalAvailable << '\n';
+
+        std::cout
+            << "\n--- TS Queue ---\n"
+            << "Accepted blocks: "
+            << queue.acceptedBlocks << '\n'
+            << "Accepted bytes: "
+            << queue.acceptedBytes << '\n'
+            << "Popped blocks: "
+            << queue.poppedBlocks << '\n'
+            << "Popped bytes: "
+            << queue.poppedBytes << '\n'
+            << "Queued blocks: "
+            << queue.queuedBlocks << '\n'
+            << "Queued bytes: "
+            << queue.queuedBytes << '\n'
+            << "Peak blocks: "
+            << queue.peakBlocks << '\n'
+            << "Peak bytes: "
+            << queue.peakBytes << '\n'
+            << "Dropped blocks: "
+            << queue.droppedBlocks << '\n'
+            << "Dropped bytes: "
+            << queue.droppedBytes << '\n'
+            << "Overflow blocks: "
+            << queue.overflowBlocks << '\n'
+            << "Invalid blocks: "
+            << queue.invalidBlocks << '\n'
+            << "Rejected closed blocks: "
+            << queue.rejectedClosedBlocks << '\n'
+            << "Discarded blocks: "
+            << queue.discardedBlocks << '\n'
+            << "Queue closed: "
+            << queue.closed << '\n';
+
+        std::cout
+            << "\n--- HLS Consumer ---\n"
+            << "Consumed blocks: "
+            << consumer.consumedBlocks << '\n'
+            << "Consumed bytes: "
+            << consumer.consumedBytes << '\n'
+            << "Forwarded blocks: "
+            << consumer.forwardedBlocks << '\n'
+            << "Forwarded bytes: "
+            << consumer.forwardedBytes << '\n'
+            << "Discontinuities: "
+            << consumer.discontinuities << '\n'
+            << "Queue timeouts: "
+            << consumer.queueTimeouts << '\n'
+            << "Write errors: "
+            << consumer.writeErrors << '\n'
+            << "Buffer update errors: "
+            << consumer.bufferUpdateErrors << '\n'
+            << "Process errors: "
+            << consumer.processErrors << '\n'
+            << "Playlist updates: "
+            << consumer.playlistUpdates << '\n'
+            << "Registered segments: "
+            << consumer.registeredSegments << '\n';
+
+        std::cout
+            << "\n--- Circular Disk Buffer ---\n"
+            << "Segment count: "
+            << consumer.buffer.segmentCount << '\n'
+            << "Storage bytes: "
+            << consumer.buffer.storageBytes << '\n'
+            << "Duration ms: "
+            << consumer.buffer.durationMs << '\n'
+            << "Total added segments: "
+            << consumer.buffer.totalAddedSegments << '\n'
+            << "Total removed segments: "
+            << consumer.buffer.totalRemovedSegments << '\n'
+            << "Pending deletions: "
+            << consumer.pendingDeletionCount << '\n'
+            << "Total storage bytes: "
+            << consumer.totalStorageBytes << '\n';
+    }
+
+    std::cout
+        << "\n--- Playback Manager ---\n"
+        << "Playback state: "
+        << playbackStateToString(playback.state)
+        << '\n'
         << "Buffer available: "
-        << (playbackStats.bufferAvailable ? "YES" : "NO")
-        << '\n'
-
+        << playback.bufferAvailable << '\n'
         << "Oldest position ms: "
-        << playbackStats.oldestPositionMs << '\n'
-
+        << playback.oldestPositionMs << '\n'
         << "Live position ms: "
-        << playbackStats.livePositionMs << '\n'
-
+        << playback.livePositionMs << '\n'
         << "Playback position ms: "
-        << playbackStats.playbackPositionMs << '\n'
-
+        << playback.playbackPositionMs << '\n'
         << "Published buffer duration ms: "
-        << playbackStats.bufferDurationMs << '\n'
-
+        << playback.bufferDurationMs << '\n'
         << "Delay from live ms: "
-        << playbackStats.delayFromLiveMs << '\n'
-
+        << playback.delayFromLiveMs << '\n'
         << "Position in buffer ms: "
-        << playbackStats.positionInBufferMs << '\n'
-
+        << playback.positionInBufferMs << '\n'
         << "At live edge: "
-        << (playbackStats.atLiveEdge ? "YES" : "NO")
-        << '\n'
-
+        << playback.atLiveEdge << '\n'
         << "Position expired: "
-        << (playbackStats.positionExpired ? "YES" : "NO")
-        << '\n'
-
+        << playback.positionExpired << '\n'
         << "Seek required: "
-        << (playbackStats.seekRequired ? "YES" : "NO")
-        << '\n'
-
+        << playback.seekRequired << '\n'
         << "Seek revision: "
-        << playbackStats.seekRevision << '\n'
-
+        << playback.seekRevision << '\n'
         << "Playback error: "
-        << (
-            playbackStats.errorMessage.empty()
+        << (playback.errorMessage.empty()
                 ? "NONE"
-                : playbackStats.errorMessage
-        )
+                : playback.errorMessage)
         << '\n'
-
+        << "Session error: "
+        << (session.errorMessage.empty()
+                ? "NONE"
+                : session.errorMessage)
+        << '\n'
         << "=====================================\n";
-
-    std::cout << output.str();
 }
 
-bool synchronizePlayback(
-    const HlsConsumer& consumer,
-    PlaybackManager& playback
+void processCommand(
+    const std::string& command,
+    SessionController& controller,
+    const ServiceManager& services
 )
 {
-    return playback.updateBufferInterval(
-        GENERATION_ID,
-        consumer.publishedInterval()
-    );
+    std::istringstream input(command);
+
+    std::string value;
+
+    if (!(input >> value))
+    {
+        return;
+    }
+
+    std::string extra;
+
+    if (input >> extra)
+    {
+        std::cerr << "[WARNING] Invalid command\n";
+
+        return;
+    }
+
+    bool success = false;
+
+    if (value == "q")
+    {
+        stopRequested = 1;
+
+        return;
+    }
+
+    if (value == "h")
+    {
+        printCommands();
+
+        return;
+    }
+
+    if (value == "s")
+    {
+        printStatistics(controller);
+
+        return;
+    }
+
+    if (value == "l")
+    {
+        printServices(services);
+
+        return;
+    }
+
+    if (value == "n")
+    {
+        success = controller.nextChannel();
+    }
+    else if (value == "p")
+    {
+        success = controller.previousChannel();
+    }
+    else
+    {
+        unsigned int channelNumber = 0;
+
+        std::istringstream numberInput(value);
+
+        if (value.find_first_not_of("0123456789")
+                != std::string::npos ||
+            !(numberInput >> channelNumber) ||
+            !numberInput.eof() ||
+            channelNumber == 0)
+        {
+            std::cerr
+                << "[WARNING] Unknown command: "
+                << value << '\n';
+
+            return;
+        }
+
+        success =
+            controller.selectChannel(channelNumber);
+    }
+
+    if (!success)
+    {
+        std::cerr
+            << "[WARNING] Channel selection failed\n";
+
+        return;
+    }
+
+    const auto snapshot = controller.snapshot();
+
+    if (snapshot.activeService)
+    {
+        std::cout
+            << "[INFO] Selected channel: "
+            << snapshot.activeService->channelNumber
+            << " - "
+            << snapshot.activeService->name
+            << ", generation: "
+            << snapshot.generationId
+            << '\n';
+    }
 }
 
-} // namespace
+void pollCommands(
+    SessionController& controller,
+    const ServiceManager& services,
+    std::string& pendingInput,
+    bool& inputAvailable
+)
+{
+    pollfd descriptor{};
+
+    descriptor.fd =
+        inputAvailable ? STDIN_FILENO : -1;
+
+    descriptor.events = POLLIN;
+
+    const int result = ::poll(
+        &descriptor,
+        1,
+        static_cast<int>(
+            CONTROL_INTERVAL.count()
+        )
+    );
+
+    if (result < 0)
+    {
+        if (errno != EINTR)
+        {
+            inputAvailable = false;
+        }
+
+        return;
+    }
+
+    if (result == 0 || stopRequested)
+    {
+        return;
+    }
+
+    if (descriptor.revents & (POLLIN | POLLHUP))
+    {
+        char buffer[256];
+
+        const ssize_t count = ::read(
+            STDIN_FILENO,
+            buffer,
+            sizeof(buffer)
+        );
+
+        if (count == 0)
+        {
+            if (!pendingInput.empty())
+            {
+                processCommand(
+                    pendingInput,
+                    controller,
+                    services
+                );
+
+                pendingInput.clear();
+            }
+
+            inputAvailable = false;
+
+            return;
+        }
+
+        if (count < 0)
+        {
+            if (errno != EINTR && errno != EAGAIN)
+            {
+                inputAvailable = false;
+            }
+
+            return;
+        }
+
+        pendingInput.append(
+            buffer,
+            static_cast<std::size_t>(count)
+        );
+
+        std::size_t newline;
+
+        while (!stopRequested &&
+               (newline = pendingInput.find('\n'))
+                   != std::string::npos)
+        {
+            const std::string command =
+                pendingInput.substr(0, newline);
+
+            pendingInput.erase(0, newline + 1);
+
+            processCommand(
+                command,
+                controller,
+                services
+            );
+        }
+
+        if (pendingInput.size() > 4096)
+        {
+            pendingInput.clear();
+
+            std::cerr
+                << "[WARNING] Input too long\n";
+        }
+    }
+
+    if (descriptor.revents & (POLLERR | POLLNVAL))
+    {
+        inputAvailable = false;
+    }
+}
+
+}
 
 int main()
 {
-    std::signal(SIGINT, handleSignal);
-    std::signal(SIGTERM, handleSignal);
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
     std::signal(SIGPIPE, SIG_IGN);
 
-    std::cout
-        << "IPTV M10 Producer-Consumer Receiver\n\n";
+    std::cout << std::boolalpha;
 
-    BoundedTsQueue queue(
-        QUEUE_MAX_BYTES,
-        QUEUE_MAX_BLOCKS
-    );
+    ServiceManager services;
 
-    HlsConfig hlsConfig{};
+    HlsConfig hlsConfig;
 
     hlsConfig.outputDirectory = "runtime/hls";
     hlsConfig.segmentDurationSeconds = 2;
@@ -315,280 +501,131 @@ int main()
     hlsConfig.playlistFilename = "producer.m3u8";
     hlsConfig.deleteSegments = false;
 
-    BufferConfig bufferConfig{};
+    BufferConfig bufferConfig;
 
     bufferConfig.storageDirectory =
         hlsConfig.outputDirectory;
 
-    bufferConfig.deletionMode =
-        SegmentDeletionMode::Deferred;
-
     bufferConfig.maxDurationMs =
         30ULL * 60ULL * 1000ULL;
 
-    RtpProducer producer(
-        queue,
-        RTP_PORT
-    );
+    bufferConfig.maxStorageBytes =
+        15ULL * 1024ULL * 1024ULL * 1024ULL;
 
-    HlsConsumer consumer(
-        queue,
+    bufferConfig.maxTotalStorageBytes =
+        20ULL * 1024ULL * 1024ULL * 1024ULL;
+
+    bufferConfig.deletionMode =
+        SegmentDeletionMode::Deferred;
+
+    bufferConfig.deletionGrace =
+        std::chrono::milliseconds(30000);
+
+    SessionController controller(
+        services,
         hlsConfig,
         bufferConfig
     );
 
-    PlaybackManager playback(2000);
-
-    playback.reset(GENERATION_ID);
-
-    if (!producer.initialize())
-    {
-        playback.setError(producer.lastError());
-
-        std::cerr
-            << "Failed to initialize RTP producer: "
-            << producer.lastError() << '\n';
-
-        return 1;
-    }
-
-    if (!consumer.initialize())
-    {
-        playback.setError(consumer.lastError());
-
-        std::cerr
-            << "Failed to initialize HLS consumer: "
-            << consumer.lastError() << '\n';
-
-        return 1;
-    }
-
-    std::thread producerThread;
-    std::thread consumerThread;
-
-    bool coordinatorError = false;
+    bool failed = false;
 
     try
     {
-        if (!playback.start())
+        if (!controller.start())
         {
-            throw std::runtime_error(
-                "Failed to start Playback Manager"
-            );
+            std::cerr
+                << "[ERROR] Startup failed: "
+                << controller.snapshot().errorMessage
+                << '\n';
+
+            return 1;
         }
 
-        std::cout
-            << "[INFO] Playback Manager started: "
-            << playbackStateToString(
-                playback.snapshot().state
-            )
-            << '\n';
+        printCommands();
 
-        consumerThread = std::thread(
-            &HlsConsumer::run,
-            &consumer
-        );
-
-        producerThread = std::thread(
-            &RtpProducer::run,
-            &producer
-        );
-
-        std::cout
-            << "\n[INFO] Worker threads started\n"
-            << "Queue capacity: "
-            << QUEUE_MAX_BYTES << " bytes\n"
-            << "Queue block limit: "
-            << QUEUE_MAX_BLOCKS << '\n'
-            << "Press Ctrl+C to stop\n";
+        printServices(services);
 
         auto lastStatistics =
             std::chrono::steady_clock::now();
 
+        bool inputAvailable = true;
+
+        std::string pendingInput;
+
         while (!stopRequested)
         {
-            if (producer.hasFatalError())
+            if (!controller.update())
             {
-                playback.setError(
-                    producer.lastError()
-                );
+                failed = true;
 
                 break;
             }
 
-            if (consumer.hasFatalError())
-            {
-                playback.setError(
-                    consumer.lastError()
-                );
-
-                break;
-            }
-
-            if (
-                producer.isFinished() ||
-                consumer.isFinished()
-            )
-            {
-                coordinatorError = true;
-
-                playback.setError(
-                    "Worker finished unexpectedly"
-                );
-
-                std::cerr
-                    << "[ERROR] Worker finished "
-                    << "unexpectedly\n";
-
-                break;
-            }
-
-            if (!synchronizePlayback(
-                    consumer,
-                    playback
-                ))
-            {
-                coordinatorError = true;
-
-                playback.setError(
-                    "Invalid published buffer interval"
-                );
-
-                break;
-            }
+            pollCommands(
+                controller,
+                services,
+                pendingInput,
+                inputAvailable
+            );
 
             const auto now =
                 std::chrono::steady_clock::now();
 
-            if (
-                now - lastStatistics >=
-                STATISTICS_INTERVAL
-            )
+            if (now - lastStatistics >=
+                STATISTICS_INTERVAL)
             {
-                printStatistics(
-                    producer,
-                    consumer,
-                    queue,
-                    playback
-                );
+                printStatistics(controller);
 
                 lastStatistics = now;
             }
-
-            std::this_thread::sleep_for(
-                CONTROL_INTERVAL
-            );
         }
     }
     catch (const std::exception& error)
     {
-        coordinatorError = true;
-
-        playback.setError(error.what());
-
         std::cerr
-            << "[ERROR] Coordinator exception: "
-            << error.what() << '\n';
+            << "[ERROR] "
+            << error.what()
+            << '\n';
+
+        failed = true;
     }
     catch (...)
     {
-        coordinatorError = true;
+        std::cerr << "[ERROR] Unknown error\n";
 
-        playback.setError(
-            "Unknown coordinator exception"
-        );
-
-        std::cerr
-            << "[ERROR] Unknown coordinator exception\n";
+        failed = true;
     }
+
+    printStatistics(controller);
+
+    controller.stop();
+
+    const auto finalSnapshot =
+        controller.snapshot();
 
     std::cout
-        << "\n[INFO] Stopping IPTV receiver...\n";
+        << "Final session state: "
+        << sessionStateToString(finalSnapshot.state)
+        << '\n'
+        << "Final playback state: "
+        << playbackStateToString(
+            finalSnapshot.playback.state
+        )
+        << '\n';
 
-    producer.requestStop();
-
-    if (
-        coordinatorError ||
-        producer.hasFatalError() ||
-        consumer.hasFatalError()
-    )
-    {
-        queue.abort();
-    }
-
-    if (producerThread.joinable())
-    {
-        producerThread.join();
-    }
-
-    queue.close();
-
-    if (consumerThread.joinable())
-    {
-        consumerThread.join();
-    }
-
-    if (!synchronizePlayback(
-            consumer,
-            playback
-        ))
-    {
-        coordinatorError = true;
-
-        playback.setError(
-            "Invalid final buffer interval"
-        );
-    }
-
-    if (producer.hasFatalError())
-    {
-        playback.setError(
-            producer.lastError()
-        );
-
-        std::cerr
-            << "[ERROR] Producer: "
-            << producer.lastError() << '\n';
-    }
-
-    if (consumer.hasFatalError())
-    {
-        playback.setError(
-            consumer.lastError()
-        );
-
-        std::cerr
-            << "[ERROR] Consumer: "
-            << consumer.lastError() << '\n';
-    }
-
-    const bool failed =
-        coordinatorError ||
-        producer.hasFatalError() ||
-        consumer.hasFatalError();
-
-    if (!failed)
-    {
-        playback.stop();
-    }
-
-    printStatistics(
-        producer,
-        consumer,
-        queue,
-        playback
-    );
-
-    if (failed)
+    if (failed ||
+        finalSnapshot.state == SessionState::Error)
     {
         std::cerr
-            << "Receiver stopped due to error\n";
+            << "[ERROR] Receiver stopped with error: "
+            << finalSnapshot.errorMessage
+            << '\n';
 
         return 1;
     }
 
     std::cout
-        << "Receiver stopped successfully\n";
+        << "[INFO] Receiver stopped successfully\n";
 
     return 0;
 }

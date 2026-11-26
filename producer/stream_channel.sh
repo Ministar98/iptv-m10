@@ -47,7 +47,7 @@ echo "========================================"
 
 exec ffmpeg \
     -hide_banner \
-    -loglevel warning \
+    -loglevel warning -nostdin \
     -re \
     -stream_loop -1 \
     -i "${MEDIA_FILE}" \
