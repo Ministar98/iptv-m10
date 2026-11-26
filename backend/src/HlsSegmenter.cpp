@@ -38,10 +38,16 @@ bool HlsSegmenter::start(
 
     stop();
 
+    const std::filesystem::path playlistName =
+        config.playlistFilename;
+
     if (config.outputDirectory.empty() ||
         config.segmentDurationSeconds == 0 ||
         config.playlistSize == 0 ||
-        config.deleteThreshold == 0)
+        config.deleteThreshold == 0 ||
+        playlistName.empty() ||
+        playlistName.has_parent_path() ||
+        playlistName.extension() != ".m3u8")
     {
         std::cerr
             << "Invalid HLS configuration\n";
@@ -67,7 +73,7 @@ bool HlsSegmenter::start(
 
     const std::string playlistPath =
         (config.outputDirectory /
-         "index.m3u8").string();
+         playlistName).string();
 
     const std::string segmentPath =
         (config.outputDirectory /
@@ -87,6 +93,15 @@ bool HlsSegmenter::start(
         std::to_string(
             config.deleteThreshold
         );
+
+    std::string hlsFlags =
+        "independent_segments+temp_file";
+
+    if (config.deleteSegments)
+    {
+        hlsFlags =
+            "delete_segments+" + hlsFlags;
+    }
 
     int pipeFds[2];
 
@@ -194,7 +209,7 @@ bool HlsSegmenter::start(
             "mpegts",
 
             "-hls_flags",
-            "delete_segments+independent_segments+temp_file",
+            hlsFlags.c_str(),
 
             "-hls_segment_filename",
             segmentPath.c_str(),
@@ -227,6 +242,17 @@ bool HlsSegmenter::start(
     std::cout
         << "HLS output: "
         << config.outputDirectory << '\n';
+
+    std::cout
+        << "HLS playlist: "
+        << config.playlistFilename << '\n';
+
+    std::cout
+        << "Automatic segment deletion: "
+        << (config.deleteSegments
+                ? "ENABLED"
+                : "DISABLED")
+        << '\n';
 
     return true;
 }

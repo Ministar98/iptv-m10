@@ -275,3 +275,211 @@ target_compile_options(hls_segmenter_test PRIVATE
     -Wextra
     -Wpedantic
 )
+# Circular disk buffer library
+
+find_package(Threads REQUIRED)
+
+add_library(iptv_buffer STATIC
+    src/CircularDiskBuffer.cpp
+)
+
+target_include_directories(iptv_buffer PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_buffer PUBLIC
+    Threads::Threads
+)
+
+target_compile_options(iptv_buffer PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+# Circular disk buffer tests
+
+add_executable(circular_disk_buffer_test
+    tests/CircularDiskBufferTest.cpp
+)
+
+target_link_libraries(circular_disk_buffer_test PRIVATE
+    iptv_buffer
+)
+
+target_compile_options(circular_disk_buffer_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME circular_disk_buffer_unit_test
+    COMMAND circular_disk_buffer_test
+)
+
+set_tests_properties(
+    circular_disk_buffer_unit_test
+    PROPERTIES TIMEOUT 30
+)
+# HLS playlist parser library
+
+add_library(iptv_hls_playlist STATIC
+    src/HlsPlaylistParser.cpp
+)
+
+target_include_directories(iptv_hls_playlist PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_options(iptv_hls_playlist PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+# HLS playlist parser tests
+
+add_executable(hls_playlist_parser_test
+    tests/HlsPlaylistParserTest.cpp
+)
+
+target_link_libraries(hls_playlist_parser_test PRIVATE
+    iptv_hls_playlist
+)
+
+target_compile_options(hls_playlist_parser_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME hls_playlist_parser_unit_test
+    COMMAND hls_playlist_parser_test
+)
+
+set_tests_properties(
+    hls_playlist_parser_unit_test
+    PROPERTIES TIMEOUT 5
+)
+# HLS buffer manager library
+
+add_library(iptv_hls_buffer STATIC
+    src/HlsBufferManager.cpp
+)
+
+target_include_directories(iptv_hls_buffer PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_hls_buffer PUBLIC
+    iptv_buffer
+    iptv_hls_playlist
+)
+
+target_compile_options(iptv_hls_buffer PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+# HLS buffer manager tests
+
+add_executable(hls_buffer_manager_test
+    tests/HlsBufferManagerTest.cpp
+)
+
+target_link_libraries(hls_buffer_manager_test PRIVATE
+    iptv_hls_buffer
+)
+
+target_compile_options(hls_buffer_manager_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME hls_buffer_manager_unit_test
+    COMMAND hls_buffer_manager_test
+)
+
+set_tests_properties(
+    hls_buffer_manager_unit_test
+    PROPERTIES TIMEOUT 10
+)
+# HLS playlist writer library
+
+add_library(iptv_hls_writer STATIC
+    src/HlsPlaylistWriter.cpp
+)
+
+target_include_directories(iptv_hls_writer PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_hls_writer PUBLIC
+    iptv_buffer
+)
+
+target_compile_options(iptv_hls_writer PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+# HLS playlist writer tests
+
+add_executable(hls_playlist_writer_test
+    tests/HlsPlaylistWriterTest.cpp
+)
+
+target_link_libraries(hls_playlist_writer_test PRIVATE
+    iptv_hls_writer
+    iptv_hls_playlist
+)
+
+target_compile_options(hls_playlist_writer_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME hls_playlist_writer_unit_test
+    COMMAND hls_playlist_writer_test
+)
+
+set_tests_properties(
+    hls_playlist_writer_unit_test
+    PROPERTIES TIMEOUT 10
+)
+# Deferred segment deletion tests
+
+add_executable(deferred_deletion_test
+    tests/DeferredDeletionTest.cpp
+)
+
+target_link_libraries(deferred_deletion_test PRIVATE
+    iptv_buffer
+    iptv_hls_writer
+)
+
+target_compile_options(deferred_deletion_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME deferred_deletion_unit_test
+    COMMAND deferred_deletion_test
+)
+
+set_tests_properties(
+    deferred_deletion_unit_test
+    PROPERTIES TIMEOUT 10
+)
+
+target_link_libraries(iptv_backend PRIVATE iptv_hls_buffer iptv_hls_writer)

@@ -5,6 +5,8 @@
 #include "PatParser.hpp"
 #include "PmtParser.hpp"
 #include "HlsSegmenter.hpp"
+#include "HlsBufferManager.hpp"
+#include "HlsPlaylistWriter.hpp"
 
 #include <array>
 #include <cerrno>
@@ -310,6 +312,8 @@ int main()
     hlsConfig.playlistSize = 60;
 
     hlsConfig.deleteThreshold = 2;
+    hlsConfig.playlistFilename = "producer.m3u8";
+    hlsConfig.deleteSegments = false;
 
     // Remove files belonging to a previous
     // prototype playback session.
@@ -330,6 +334,40 @@ int main()
 
         return 1;
     }
+
+    BufferConfig bufferConfig{};
+    bufferConfig.storageDirectory = hlsConfig.outputDirectory;
+    bufferConfig.deletionMode = SegmentDeletionMode::Deferred;
+    // Short integration window; change to 1800000 for I9.10.8.
+    bufferConfig.maxDurationMs = 30ULL * 60ULL * 1000ULL;
+    HlsBufferManager manager(bufferConfig);
+    if (!manager.initialize()) return 1;
+
+    auto updateBuffer = [&]() -> bool
+    {
+        if (!manager.collectExpiredSegments()) return false;
+        const auto result = manager.update();
+        if (result.status == HlsUpdateStatus::PlaylistUnavailable)
+            return true;
+        if (result.status != HlsUpdateStatus::Updated &&
+            result.status != HlsUpdateStatus::NoChanges)
+        {
+            std::cerr << "HLS buffer update failed: "
+                      << static_cast<int>(result.status) << '\n';
+            return false;
+        }
+        if (result.addedSegments || result.endList)
+        {
+            if (!HlsPlaylistWriter::write(
+                    hlsConfig.outputDirectory / "index.m3u8",
+                    manager.buffer().segments(), 2, true,
+                    result.endList, manager.buffer().discontinuitySequence()))
+                return false;
+            manager.markPlaylistPublished();
+        }
+        return true;
+    };
+    auto lastBufferUpdate = std::chrono::steady_clock::now();
 
     HlsSegmenter segmenter;
 
@@ -442,12 +480,28 @@ int main()
             break;
         }
 
+        if (now - lastBufferUpdate >= std::chrono::milliseconds(250))
+        {
+            lastBufferUpdate = now;
+            if (!updateBuffer())
+            {
+                fatalError = true;
+                break;
+            }
+        }
+
         if (now - lastStatistics >=
             std::chrono::seconds(
                 STATISTICS_INTERVAL_SECONDS
             ))
         {
             printStatistics(stats);
+            const auto bufferStats = manager.buffer().statistics();
+            std::cout << "Buffer duration ms: " << bufferStats.durationMs
+                      << " | Active segments: " << bufferStats.segmentCount
+                      << " | Pending deletion: " << manager.buffer().pendingDeletionCount()
+                      << " | Total registered bytes: " << manager.buffer().totalStorageBytes()
+                      << '\n';
 
             lastStatistics = now;
         }
@@ -824,6 +878,7 @@ int main()
     socket.close();
 
     segmenter.stop();
+    if (!fatalError && !updateBuffer()) fatalError = true;
 
     printStatistics(stats);
 

@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <string>
+
 #include <sys/types.h>
 
 struct HlsConfig
@@ -15,6 +17,11 @@ struct HlsConfig
     unsigned int playlistSize = 60;
 
     unsigned int deleteThreshold = 2;
+
+    std::string playlistFilename =
+        "index.m3u8";
+
+    bool deleteSegments = true;
 };
 
 class HlsSegmenter
