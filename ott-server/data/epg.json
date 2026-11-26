@@ -1,0 +1,62 @@
+[
+  {
+    "serviceId": 1,
+    "programs": [
+      {
+        "title": "Morning News",
+        "description": "Latest national and international news.",
+        "durationMinutes": 60
+      },
+      {
+        "title": "Daily Report",
+        "description": "Daily events and current affairs.",
+        "durationMinutes": 30
+      },
+      {
+        "title": "World News",
+        "description": "International news and analysis.",
+        "durationMinutes": 30
+      }
+    ]
+  },
+  {
+    "serviceId": 2,
+    "programs": [
+      {
+        "title": "Sports News",
+        "description": "Latest sports results and news.",
+        "durationMinutes": 30
+      },
+      {
+        "title": "Football Highlights",
+        "description": "Highlights from football matches.",
+        "durationMinutes": 60
+      },
+      {
+        "title": "Sports Analysis",
+        "description": "Analysis of major sporting events.",
+        "durationMinutes": 30
+      }
+    ]
+  },
+  {
+    "serviceId": 3,
+    "programs": [
+      {
+        "title": "Nature Documentary",
+        "description": "Exploring wildlife and nature.",
+        "durationMinutes": 60
+      },
+      {
+        "title": "Science Today",
+        "description": "Scientific discoveries and technology.",
+        "durationMinutes": 30
+      },
+      {
+        "title": "Travel Guide",
+        "description": "Exploring destinations around the world.",
+        "durationMinutes": 30
+      }
+    ]
+  }
+]

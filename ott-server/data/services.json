@@ -1,0 +1,44 @@
+[
+  {
+    "serviceId": 1,
+    "channelNumber": 1,
+    "name": "Channel 1",
+    "description": "IPTV test service 1",
+    "streamProfile": {
+      "protocol": "RTP",
+      "container": "MPEG-TS",
+      "videoCodec": "H.264",
+      "audioCodec": "AAC",
+      "rtpAddress": "127.0.0.1",
+      "rtpPort": 5004
+    }
+  },
+  {
+    "serviceId": 2,
+    "channelNumber": 2,
+    "name": "Channel 2",
+    "description": "IPTV test service 2",
+    "streamProfile": {
+      "protocol": "RTP",
+      "container": "MPEG-TS",
+      "videoCodec": "H.264",
+      "audioCodec": "AAC",
+      "rtpAddress": "127.0.0.1",
+      "rtpPort": 5004
+    }
+  },
+  {
+    "serviceId": 3,
+    "channelNumber": 3,
+    "name": "Channel 3",
+    "description": "IPTV test service 3",
+    "streamProfile": {
+      "protocol": "RTP",
+      "container": "MPEG-TS",
+      "videoCodec": "H.264",
+      "audioCodec": "AAC",
+      "rtpAddress": "127.0.0.1",
+      "rtpPort": 5004
+    }
+  }
+]

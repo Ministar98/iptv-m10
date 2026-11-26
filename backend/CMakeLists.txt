@@ -758,3 +758,118 @@ target_compile_options(session_controller_test PRIVATE
     -Wextra
     -Wpedantic
 )
+# OTT REST Client library
+
+find_package(CURL REQUIRED)
+find_package(nlohmann_json REQUIRED)
+
+add_library(iptv_ott STATIC
+    src/OttRestClient.cpp
+)
+
+target_include_directories(iptv_ott PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_ott PUBLIC
+    iptv_service
+    CURL::libcurl
+    nlohmann_json::nlohmann_json
+)
+
+target_compile_options(iptv_ott PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+# OTT REST Client integration test
+
+add_executable(ott_rest_client_test
+    tests/OttRestClientTest.cpp
+)
+
+target_link_libraries(ott_rest_client_test PRIVATE
+    iptv_ott
+)
+
+target_compile_options(ott_rest_client_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# OTT REST backend integration
+
+target_link_libraries(iptv_backend PRIVATE
+    iptv_ott
+)
+# OTT Metadata Manager
+
+add_library(iptv_ott_metadata STATIC
+    src/OttMetadataManager.cpp
+)
+
+target_include_directories(iptv_ott_metadata PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_ott_metadata PUBLIC
+    iptv_ott
+    Threads::Threads
+)
+
+target_compile_options(iptv_ott_metadata PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_link_libraries(iptv_backend PRIVATE
+    iptv_ott_metadata
+)
+# OTT Metadata Manager integration test
+
+add_executable(ott_metadata_manager_test
+    tests/OttMetadataManagerTest.cpp
+)
+
+target_link_libraries(ott_metadata_manager_test PRIVATE
+    iptv_ott_metadata
+)
+
+target_compile_options(ott_metadata_manager_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# Automated OTT fault tests
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+add_executable(ott_metadata_fault_test
+    tests/OttMetadataFaultTest.cpp
+)
+
+target_link_libraries(ott_metadata_fault_test PRIVATE
+    iptv_ott_metadata
+)
+
+target_compile_options(ott_metadata_fault_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME ott_metadata_fault_unit_test
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_ott_fault_test.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/ott_fault_server.py
+        $<TARGET_FILE:ott_metadata_fault_test>
+)
+
+set_tests_properties(
+    ott_metadata_fault_unit_test
+    PROPERTIES TIMEOUT 25
+)

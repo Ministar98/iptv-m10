@@ -1,0 +1,16 @@
+{
+  "name": "iptv-m10-ott-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OTT Middleware REST server for IPTV M10",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

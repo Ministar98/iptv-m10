@@ -1,5 +1,7 @@
 #include "SessionController.hpp"
 
+#include "OttMetadataManager.hpp"
+#include <utility>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -33,7 +35,7 @@ void printCommands()
         << "\n========== IPTV M10 ==========\n"
         << "n     - Next channel\n"
         << "p     - Previous channel\n"
-        << "1-3   - Select channel\n"
+        << "NUM   - Select channel\n"
         << "s     - Statistics\n"
         << "l     - Service list\n"
         << "h     - Help\n"
@@ -490,142 +492,230 @@ int main()
 
     std::cout << std::boolalpha;
 
-    ServiceManager services;
-
-    HlsConfig hlsConfig;
-
-    hlsConfig.outputDirectory = "runtime/hls";
-    hlsConfig.segmentDurationSeconds = 2;
-    hlsConfig.playlistSize = 60;
-    hlsConfig.deleteThreshold = 2;
-    hlsConfig.playlistFilename = "producer.m3u8";
-    hlsConfig.deleteSegments = false;
-
-    BufferConfig bufferConfig;
-
-    bufferConfig.storageDirectory =
-        hlsConfig.outputDirectory;
-
-    bufferConfig.maxDurationMs =
-        30ULL * 60ULL * 1000ULL;
-
-    bufferConfig.maxStorageBytes =
-        15ULL * 1024ULL * 1024ULL * 1024ULL;
-
-    bufferConfig.maxTotalStorageBytes =
-        20ULL * 1024ULL * 1024ULL * 1024ULL;
-
-    bufferConfig.deletionMode =
-        SegmentDeletionMode::Deferred;
-
-    bufferConfig.deletionGrace =
-        std::chrono::milliseconds(30000);
-
-    SessionController controller(
-        services,
-        hlsConfig,
-        bufferConfig
-    );
-
-    bool failed = false;
-
     try
     {
-        if (!controller.start())
+        std::cout
+            << "[INFO] Loading TV services from OTT Middleware\n";
+
+	OttMetadataManager ottMetadata;
+	auto catalog = ottMetadata.getServices();
+
+        if (!catalog.success())
         {
             std::cerr
-                << "[ERROR] Startup failed: "
-                << controller.snapshot().errorMessage
+                << "[ERROR] Failed to load OTT service catalog: "
+                << ottRestStatusToString(catalog.networkStatus)
+                << " - "
+                << catalog.errorMessage
                 << '\n';
 
             return 1;
         }
 
-        printCommands();
+        std::cout
+            << "[INFO] OTT metadata source: "
+            << ottMetadataSourceToString(catalog.source)
+            << '\n'
+            << "[INFO] OTT request attempts: "
+            << catalog.attempts
+            << '\n';
 
-        printServices(services);
-
-        auto lastStatistics =
-            std::chrono::steady_clock::now();
-
-        bool inputAvailable = true;
-
-        std::string pendingInput;
-
-        while (!stopRequested)
+        if (stopRequested)
         {
-            if (!controller.update())
-            {
-                failed = true;
+            return 0;
+        }
 
-                break;
+        const ServiceManager services(
+            std::move(catalog.data)
+        );
+
+        if (services.empty())
+        {
+            std::cerr
+                << "[ERROR] OTT service catalog is empty\n";
+
+            return 1;
+        }
+
+        std::cout
+            << "[INFO] OTT service catalog loaded: "
+            << services.serviceCount()
+            << " services\n";
+
+        HlsConfig hlsConfig;
+
+        hlsConfig.outputDirectory = "runtime/hls";
+        hlsConfig.segmentDurationSeconds = 2;
+        hlsConfig.playlistSize = 60;
+        hlsConfig.deleteThreshold = 2;
+        hlsConfig.playlistFilename = "producer.m3u8";
+        hlsConfig.deleteSegments = false;
+
+        BufferConfig bufferConfig;
+
+        bufferConfig.storageDirectory =
+            hlsConfig.outputDirectory;
+
+        bufferConfig.maxDurationMs =
+            30ULL * 60ULL * 1000ULL;
+
+        bufferConfig.maxStorageBytes =
+            15ULL * 1024ULL * 1024ULL * 1024ULL;
+
+        bufferConfig.maxTotalStorageBytes =
+            20ULL * 1024ULL * 1024ULL * 1024ULL;
+
+        bufferConfig.deletionMode =
+            SegmentDeletionMode::Deferred;
+
+        bufferConfig.deletionGrace =
+            std::chrono::milliseconds(30000);
+
+        SessionController controller(
+            services,
+            hlsConfig,
+            bufferConfig
+        );
+
+        bool failed = false;
+
+        std::string failureMessage;
+
+        try
+        {
+            if (!controller.start())
+            {
+                std::cerr
+                    << "[ERROR] Startup failed: "
+                    << controller.snapshot().errorMessage
+                    << '\n';
+
+                return 1;
             }
 
-            pollCommands(
-                controller,
-                services,
-                pendingInput,
-                inputAvailable
-            );
+            printCommands();
 
-            const auto now =
+            printServices(services);
+
+            auto lastStatistics =
                 std::chrono::steady_clock::now();
 
-            if (now - lastStatistics >=
-                STATISTICS_INTERVAL)
-            {
-                printStatistics(controller);
+            bool inputAvailable = true;
 
-                lastStatistics = now;
+            std::string pendingInput;
+
+            while (!stopRequested)
+            {
+                if (!controller.update())
+                {
+                    failed = true;
+
+                    failureMessage =
+                        controller.snapshot().errorMessage;
+
+                    break;
+                }
+
+                pollCommands(
+                    controller,
+                    services,
+                    pendingInput,
+                    inputAvailable
+                );
+
+                const auto now =
+                    std::chrono::steady_clock::now();
+
+                if (now - lastStatistics >=
+                    STATISTICS_INTERVAL)
+                {
+                    printStatistics(controller);
+
+                    lastStatistics = now;
+                }
             }
         }
+        catch (const std::exception& error)
+        {
+            failed = true;
+
+            failureMessage = error.what();
+
+            std::cerr
+                << "[ERROR] "
+                << failureMessage
+                << '\n';
+        }
+        catch (...)
+        {
+            failed = true;
+
+            failureMessage = "Unknown error";
+
+            std::cerr
+                << "[ERROR] "
+                << failureMessage
+                << '\n';
+        }
+
+        printStatistics(controller);
+
+        controller.stop();
+
+        const auto finalSnapshot =
+            controller.snapshot();
+
+        std::cout
+            << "Final session state: "
+            << sessionStateToString(finalSnapshot.state)
+            << '\n'
+            << "Final playback state: "
+            << playbackStateToString(
+                finalSnapshot.playback.state
+            )
+            << '\n';
+
+        if (failed ||
+            finalSnapshot.state == SessionState::Error)
+        {
+            if (!finalSnapshot.errorMessage.empty())
+            {
+                if (!failureMessage.empty())
+                {
+                    failureMessage += "; ";
+                }
+
+                failureMessage +=
+                    finalSnapshot.errorMessage;
+            }
+
+            std::cerr
+                << "[ERROR] Receiver stopped with error: "
+                << failureMessage
+                << '\n';
+
+            return 1;
+        }
+
+        std::cout
+            << "[INFO] Receiver stopped successfully\n";
+
+        return 0;
     }
     catch (const std::exception& error)
     {
         std::cerr
-            << "[ERROR] "
+            << "[ERROR] Backend initialization failed: "
             << error.what()
-            << '\n';
-
-        failed = true;
-    }
-    catch (...)
-    {
-        std::cerr << "[ERROR] Unknown error\n";
-
-        failed = true;
-    }
-
-    printStatistics(controller);
-
-    controller.stop();
-
-    const auto finalSnapshot =
-        controller.snapshot();
-
-    std::cout
-        << "Final session state: "
-        << sessionStateToString(finalSnapshot.state)
-        << '\n'
-        << "Final playback state: "
-        << playbackStateToString(
-            finalSnapshot.playback.state
-        )
-        << '\n';
-
-    if (failed ||
-        finalSnapshot.state == SessionState::Error)
-    {
-        std::cerr
-            << "[ERROR] Receiver stopped with error: "
-            << finalSnapshot.errorMessage
             << '\n';
 
         return 1;
     }
+    catch (...)
+    {
+        std::cerr
+            << "[ERROR] Unknown initialization error\n";
 
-    std::cout
-        << "[INFO] Receiver stopped successfully\n";
-
-    return 0;
+        return 1;
+    }
 }
