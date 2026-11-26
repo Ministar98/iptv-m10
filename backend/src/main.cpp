@@ -1,306 +1,251 @@
-#include "UdpSocket.hpp"
-#include "RtpParser.hpp"
-#include "TsParser.hpp"
-#include "PsiSectionAssembler.hpp"
-#include "PatParser.hpp"
-#include "PmtParser.hpp"
-#include "HlsSegmenter.hpp"
-#include "HlsBufferManager.hpp"
-#include "HlsPlaylistWriter.hpp"
+#include "BoundedTsQueue.hpp"
+#include "RtpProducer.hpp"
+#include "HlsConsumer.hpp"
 
-#include <array>
-#include <cerrno>
 #include <chrono>
 #include <csignal>
-#include <cstddef>
 #include <cstdint>
-#include <filesystem>
-#include <iomanip>
+#include <exception>
 #include <iostream>
-#include <map>
-#include <set>
-#include <tuple>
-#include <system_error>
+#include <sstream>
+#include <thread>
 
 namespace
 {
-    constexpr std::uint16_t RTP_PORT = 5004;
 
-    constexpr unsigned int RECEIVE_TIMEOUT_MS = 200;
+constexpr std::uint16_t RTP_PORT = 5004;
 
-    constexpr int RECEIVE_BUFFER_SIZE =
-        1024 * 1024;
+constexpr std::size_t QUEUE_MAX_BYTES =
+    8U * 1024U * 1024U;
 
-    constexpr int STATISTICS_INTERVAL_SECONDS = 5;
+constexpr std::size_t QUEUE_MAX_BLOCKS =
+    4096U;
 
-    constexpr int SIGNAL_TIMEOUT_SECONDS = 3;
+constexpr std::chrono::milliseconds
+    CONTROL_INTERVAL{100};
 
-    volatile std::sig_atomic_t stopRequested = 0;
+constexpr std::chrono::seconds
+    STATISTICS_INTERVAL{5};
 
-    void handleSignal(int)
-    {
-        stopRequested = 1;
-    }
+volatile std::sig_atomic_t stopRequested = 0;
 
-    struct ReceiverStatistics
-    {
-        std::uint64_t receivedDatagrams = 0;
-
-        std::uint64_t validRtpPackets = 0;
-
-        std::uint64_t invalidRtpPackets = 0;
-
-        std::uint64_t unexpectedSsrcPackets = 0;
-
-        std::uint64_t rtpDiscontinuities = 0;
-
-        std::uint64_t validTsPackets = 0;
-
-        std::uint64_t invalidTsPackets = 0;
-
-        std::uint64_t transportErrors = 0;
-
-        std::uint64_t validPatSections = 0;
-
-        std::uint64_t invalidPatSections = 0;
-
-        std::uint64_t validPmtSections = 0;
-
-        std::uint64_t invalidPmtSections = 0;
-
-        std::uint64_t unexpectedPmtSections = 0;
-
-        std::uint64_t forwardedBytes = 0;
-
-        std::uint64_t hlsWriteErrors = 0;
-
-        std::uint64_t receiveTimeouts = 0;
-    };
-
-    void printPid(std::uint16_t pid)
-    {
-        std::cout
-            << "0x"
-            << std::hex
-            << std::setw(4)
-            << std::setfill('0')
-            << pid
-            << std::dec
-            << std::setfill(' ')
-            << " (" << pid << ")";
-    }
-
-    void printPat(const PatTable& table)
-    {
-        std::cout
-            << "\n========== PAT ==========\n";
-
-        std::cout
-            << "Transport stream ID: "
-            << table.transportStreamId << '\n';
-
-        std::cout
-            << "Version: "
-            << static_cast<int>(
-                table.versionNumber
-            ) << '\n';
-
-        std::cout
-            << "Current table: "
-            << (table.currentNextIndicator
-                    ? "YES"
-                    : "NO")
-            << '\n';
-
-        for (const auto& program :
-             table.programs)
-        {
-            std::cout
-                << "Program "
-                << program.programNumber
-                << " -> PMT PID ";
-
-            printPid(program.pmtPid);
-
-            std::cout << '\n';
-        }
-
-        if (table.hasNetworkPid)
-        {
-            std::cout << "Network PID: ";
-
-            printPid(table.networkPid);
-
-            std::cout << '\n';
-        }
-
-        std::cout << "CRC: VALID\n";
-
-        std::cout
-            << "=========================\n";
-    }
-
-    void printPmt(
-        std::uint16_t pmtPid,
-        const PmtTable& table
-    )
-    {
-        std::cout
-            << "\n========== PMT ==========\n";
-
-        std::cout
-            << "Program: "
-            << table.programNumber << '\n';
-
-        std::cout
-            << "Version: "
-            << static_cast<int>(
-                table.versionNumber
-            ) << '\n';
-
-        std::cout
-            << "Current table: "
-            << (table.currentNextIndicator
-                    ? "YES"
-                    : "NO")
-            << '\n';
-
-        std::cout << "PMT PID: ";
-
-        printPid(pmtPid);
-
-        std::cout << '\n';
-
-        std::cout << "PCR PID: ";
-
-        printPid(table.pcrPid);
-
-        std::cout << '\n';
-
-        for (const auto& stream :
-             table.streams)
-        {
-            std::cout
-                << PmtParser::categoryName(
-                    stream.category
-                )
-                << " | "
-                << PmtParser::streamTypeName(
-                    stream.streamType
-                )
-                << " | PID ";
-
-            printPid(stream.elementaryPid);
-
-            std::cout << '\n';
-        }
-
-        std::cout << "CRC: VALID\n";
-
-        std::cout
-            << "=========================\n";
-    }
-
-    void printStatistics(
-        const ReceiverStatistics& stats
-    )
-    {
-        std::cout
-            << "\n===== Receiver statistics =====\n";
-
-        std::cout
-            << "Received datagrams: "
-            << stats.receivedDatagrams << '\n'
-
-            << "Valid RTP packets: "
-            << stats.validRtpPackets << '\n'
-
-            << "Invalid RTP packets: "
-            << stats.invalidRtpPackets << '\n'
-
-            << "Unexpected SSRC packets: "
-            << stats.unexpectedSsrcPackets << '\n'
-
-            << "RTP discontinuities: "
-            << stats.rtpDiscontinuities << '\n'
-
-            << "Valid TS packets: "
-            << stats.validTsPackets << '\n'
-
-            << "Invalid TS packets: "
-            << stats.invalidTsPackets << '\n'
-
-            << "Transport errors: "
-            << stats.transportErrors << '\n'
-
-            << "Valid PAT sections: "
-            << stats.validPatSections << '\n'
-
-            << "Invalid PAT sections: "
-            << stats.invalidPatSections << '\n'
-
-            << "Valid PMT sections: "
-            << stats.validPmtSections << '\n'
-
-            << "Invalid PMT sections: "
-            << stats.invalidPmtSections << '\n'
-
-            << "Unexpected PMT sections: "
-            << stats.unexpectedPmtSections << '\n'
-
-            << "Forwarded bytes: "
-            << stats.forwardedBytes << '\n'
-
-            << "HLS write errors: "
-            << stats.hlsWriteErrors << '\n'
-
-            << "Receive timeouts: "
-            << stats.receiveTimeouts << '\n';
-
-        std::cout
-            << "===============================\n";
-    }
+void handleSignal(int)
+{
+    stopRequested = 1;
 }
+
+void printStatistics(
+    const RtpProducer& producer,
+    const HlsConsumer& consumer,
+    const BoundedTsQueue& queue
+)
+{
+    const auto producerStats =
+        producer.statistics();
+
+    const auto consumerStats =
+        consumer.statistics();
+
+    const auto queueStats =
+        queue.statistics();
+
+    std::ostringstream output;
+
+    output
+        << "\n========== IPTV STATISTICS ==========\n"
+
+        << "\n--- RTP Producer ---\n"
+
+        << "Received datagrams: "
+        << producerStats.receivedDatagrams << '\n'
+
+        << "Valid RTP packets: "
+        << producerStats.validRtpPackets << '\n'
+
+        << "Invalid RTP packets: "
+        << producerStats.invalidRtpPackets << '\n'
+
+        << "Unexpected SSRC packets: "
+        << producerStats.unexpectedSsrcPackets << '\n'
+
+        << "RTP discontinuities: "
+        << producerStats.rtpDiscontinuities << '\n'
+
+        << "Valid TS packets: "
+        << producerStats.validTsPackets << '\n'
+
+        << "Invalid TS packets: "
+        << producerStats.invalidTsPackets << '\n'
+
+        << "Transport errors: "
+        << producerStats.transportErrors << '\n'
+
+        << "Valid PAT sections: "
+        << producerStats.validPatSections << '\n'
+
+        << "Invalid PAT sections: "
+        << producerStats.invalidPatSections << '\n'
+
+        << "Valid PMT sections: "
+        << producerStats.validPmtSections << '\n'
+
+        << "Invalid PMT sections: "
+        << producerStats.invalidPmtSections << '\n'
+
+        << "Unexpected PMT sections: "
+        << producerStats.unexpectedPmtSections << '\n'
+
+        << "Detected programs: "
+        << producerStats.detectedPrograms << '\n'
+
+        << "Resolved PMT tables: "
+        << producerStats.resolvedPmtTables << '\n'
+
+        << "Queued blocks: "
+        << producerStats.queuedBlocks << '\n'
+
+        << "Queued bytes: "
+        << producerStats.queuedBytes << '\n'
+
+        << "Producer dropped blocks: "
+        << producerStats.droppedBlocks << '\n'
+
+        << "Producer dropped bytes: "
+        << producerStats.droppedBytes << '\n'
+
+        << "Receive timeouts: "
+        << producerStats.receiveTimeouts << '\n'
+
+        << "Receive errors: "
+        << producerStats.receiveErrors << '\n'
+
+        << "Signal available: "
+        << (producerStats.signalAvailable
+                ? "YES"
+                : "NO")
+        << '\n'
+
+        << "\n--- Bounded TS Queue ---\n"
+
+        << "Accepted blocks: "
+        << queueStats.acceptedBlocks << '\n'
+
+        << "Accepted bytes: "
+        << queueStats.acceptedBytes << '\n'
+
+        << "Popped blocks: "
+        << queueStats.poppedBlocks << '\n'
+
+        << "Popped bytes: "
+        << queueStats.poppedBytes << '\n'
+
+        << "Current blocks: "
+        << queueStats.queuedBlocks << '\n'
+
+        << "Current bytes: "
+        << queueStats.queuedBytes << '\n'
+
+        << "Peak blocks: "
+        << queueStats.peakBlocks << '\n'
+
+        << "Peak bytes: "
+        << queueStats.peakBytes << '\n'
+
+        << "Dropped blocks: "
+        << queueStats.droppedBlocks << '\n'
+
+        << "Dropped bytes: "
+        << queueStats.droppedBytes << '\n'
+
+        << "Overflow blocks: "
+        << queueStats.overflowBlocks << '\n'
+
+        << "Invalid blocks: "
+        << queueStats.invalidBlocks << '\n'
+
+        << "Rejected closed blocks: "
+        << queueStats.rejectedClosedBlocks << '\n'
+
+        << "Discarded blocks: "
+        << queueStats.discardedBlocks << '\n'
+
+        << "Queue closed: "
+        << (queueStats.closed ? "YES" : "NO")
+        << '\n'
+
+        << "\n--- HLS Consumer ---\n"
+
+        << "Consumed blocks: "
+        << consumerStats.consumedBlocks << '\n'
+
+        << "Consumed bytes: "
+        << consumerStats.consumedBytes << '\n'
+
+        << "Forwarded blocks: "
+        << consumerStats.forwardedBlocks << '\n'
+
+        << "Forwarded bytes: "
+        << consumerStats.forwardedBytes << '\n'
+
+        << "Discontinuities: "
+        << consumerStats.discontinuities << '\n'
+
+        << "Queue timeouts: "
+        << consumerStats.queueTimeouts << '\n'
+
+        << "HLS write errors: "
+        << consumerStats.writeErrors << '\n'
+
+        << "Buffer update errors: "
+        << consumerStats.bufferUpdateErrors << '\n'
+
+        << "FFmpeg process errors: "
+        << consumerStats.processErrors << '\n'
+
+        << "Playlist updates: "
+        << consumerStats.playlistUpdates << '\n'
+
+        << "Registered segments: "
+        << consumerStats.registeredSegments << '\n'
+
+        << "\n--- Circular Disk Buffer ---\n"
+
+        << "Buffer duration ms: "
+        << consumerStats.buffer.durationMs << '\n'
+
+        << "Active segments: "
+        << consumerStats.buffer.segmentCount << '\n'
+
+        << "Pending deletion: "
+        << consumerStats.pendingDeletionCount << '\n'
+
+        << "Total registered bytes: "
+        << consumerStats.totalStorageBytes << '\n'
+
+        << "=====================================\n";
+
+    std::cout << output.str();
+}
+
+} // namespace
 
 int main()
 {
     std::signal(SIGINT, handleSignal);
-
     std::signal(SIGTERM, handleSignal);
-
     std::signal(SIGPIPE, SIG_IGN);
 
     std::cout
-        << "IPTV M10 Live HLS Receiver\n\n";
+        << "IPTV M10 Producer-Consumer Receiver\n\n";
 
-    UdpSocket socket;
+    // Shared bounded queue.
 
-    if (!socket.open(RTP_PORT))
-    {
-        std::cerr
-            << "Failed to open UDP socket\n";
+    BoundedTsQueue queue(
+        QUEUE_MAX_BYTES,
+        QUEUE_MAX_BLOCKS
+    );
 
-        return 1;
-    }
-
-    if (!socket.setReceiveTimeout(
-            RECEIVE_TIMEOUT_MS
-        ))
-    {
-        std::cerr
-            << "Failed to configure UDP timeout\n";
-
-        return 1;
-    }
-
-    if (!socket.setReceiveBufferSize(
-            RECEIVE_BUFFER_SIZE
-        ))
-    {
-        std::cerr
-            << "Warning: Cannot configure "
-            << "UDP receive buffer\n";
-    }
+    // HLS configuration.
 
     HlsConfig hlsConfig{};
 
@@ -312,585 +257,213 @@ int main()
     hlsConfig.playlistSize = 60;
 
     hlsConfig.deleteThreshold = 2;
-    hlsConfig.playlistFilename = "producer.m3u8";
+
+    hlsConfig.playlistFilename =
+        "producer.m3u8";
+
     hlsConfig.deleteSegments = false;
 
-    // Remove files belonging to a previous
-    // prototype playback session.
-
-    std::error_code filesystemError;
-
-    std::filesystem::remove_all(
-        hlsConfig.outputDirectory,
-        filesystemError
-    );
-
-    if (filesystemError)
-    {
-        std::cerr
-            << "Failed to clean HLS directory: "
-            << filesystemError.message()
-            << '\n';
-
-        return 1;
-    }
+    // Circular disk buffer configuration.
 
     BufferConfig bufferConfig{};
-    bufferConfig.storageDirectory = hlsConfig.outputDirectory;
-    bufferConfig.deletionMode = SegmentDeletionMode::Deferred;
-    // Short integration window; change to 1800000 for I9.10.8.
-    bufferConfig.maxDurationMs = 30ULL * 60ULL * 1000ULL;
-    HlsBufferManager manager(bufferConfig);
-    if (!manager.initialize()) return 1;
 
-    auto updateBuffer = [&]() -> bool
-    {
-        if (!manager.collectExpiredSegments()) return false;
-        const auto result = manager.update();
-        if (result.status == HlsUpdateStatus::PlaylistUnavailable)
-            return true;
-        if (result.status != HlsUpdateStatus::Updated &&
-            result.status != HlsUpdateStatus::NoChanges)
-        {
-            std::cerr << "HLS buffer update failed: "
-                      << static_cast<int>(result.status) << '\n';
-            return false;
-        }
-        if (result.addedSegments || result.endList)
-        {
-            if (!HlsPlaylistWriter::write(
-                    hlsConfig.outputDirectory / "index.m3u8",
-                    manager.buffer().segments(), 2, true,
-                    result.endList, manager.buffer().discontinuitySequence()))
-                return false;
-            manager.markPlaylistPublished();
-        }
-        return true;
-    };
-    auto lastBufferUpdate = std::chrono::steady_clock::now();
+    bufferConfig.storageDirectory =
+        hlsConfig.outputDirectory;
 
-    HlsSegmenter segmenter;
+    bufferConfig.deletionMode =
+        SegmentDeletionMode::Deferred;
 
-    if (!segmenter.start(hlsConfig))
+    bufferConfig.maxDurationMs =
+        30ULL * 60ULL * 1000ULL;
+
+    // Worker components.
+
+    RtpProducer producer(
+        queue,
+        RTP_PORT
+    );
+
+    HlsConsumer consumer(
+        queue,
+        hlsConfig,
+        bufferConfig
+    );
+
+    // Initialize UDP socket.
+
+    if (!producer.initialize())
     {
         std::cerr
-            << "Failed to start HLS segmenter\n";
+            << "Failed to initialize RTP producer: "
+            << producer.lastError() << '\n';
 
         return 1;
     }
 
-    PsiSectionAssembler patAssembler(
-        TsParser::PAT_PID
-    );
+    // Start FFmpeg before creating worker threads.
 
-    std::map<
-        std::uint16_t,
-        PsiSectionAssembler
-    > pmtAssemblers;
-
-    std::map<
-        std::uint16_t,
-        std::uint16_t
-    > programs;
-
-    std::map<
-        std::uint16_t,
-        PmtTable
-    > programTables;
-
-    std::set<
-        std::tuple<
-            std::uint16_t,
-            std::uint8_t,
-            std::uint8_t,
-            bool
-        >
-    > printedPatSections;
-
-    std::set<
-        std::tuple<
-            std::uint16_t,
-            std::uint16_t,
-            std::uint8_t,
-            bool
-        >
-    > printedPmtSections;
-
-    auto resetAssemblers = [&]()
+    if (!consumer.initialize())
     {
-        patAssembler.reset();
-
-        for (auto& entry : pmtAssemblers)
-        {
-            entry.second.reset();
-        }
-    };
-
-    ReceiverStatistics stats{};
-
-    std::array<std::uint8_t, 65536>
-        receiveBuffer{};
-
-    std::array<std::uint8_t, 65536>
-        forwardBuffer{};
-
-    bool hasPreviousSequence = false;
-
-    std::uint16_t previousSequence = 0;
-
-    bool hasActiveSsrc = false;
-
-    std::uint32_t activeSsrc = 0;
-
-    bool signalAvailable = false;
-
-    bool signalLossReported = false;
-
-    bool fatalError = false;
-
-    auto lastValidSignal =
-        std::chrono::steady_clock::now();
-
-    auto lastStatistics =
-        std::chrono::steady_clock::now();
-
-    std::cout
-        << "Listening on UDP port "
-        << RTP_PORT << '\n';
-
-    std::cout
-        << "Waiting for RTP signal...\n";
-
-    std::cout
-        << "Press Ctrl+C to stop\n";
-
-    while (!stopRequested)
-    {
-        const auto now =
-            std::chrono::steady_clock::now();
-
-        if (!segmenter.isRunning())
-        {
-            std::cerr
-                << "FFmpeg process stopped "
-                << "unexpectedly\n";
-
-            fatalError = true;
-
-            break;
-        }
-
-        if (now - lastBufferUpdate >= std::chrono::milliseconds(250))
-        {
-            lastBufferUpdate = now;
-            if (!updateBuffer())
-            {
-                fatalError = true;
-                break;
-            }
-        }
-
-        if (now - lastStatistics >=
-            std::chrono::seconds(
-                STATISTICS_INTERVAL_SECONDS
-            ))
-        {
-            printStatistics(stats);
-            const auto bufferStats = manager.buffer().statistics();
-            std::cout << "Buffer duration ms: " << bufferStats.durationMs
-                      << " | Active segments: " << bufferStats.segmentCount
-                      << " | Pending deletion: " << manager.buffer().pendingDeletionCount()
-                      << " | Total registered bytes: " << manager.buffer().totalStorageBytes()
-                      << '\n';
-
-            lastStatistics = now;
-        }
-
-        if (!signalLossReported &&
-            now - lastValidSignal >=
-                std::chrono::seconds(
-                    SIGNAL_TIMEOUT_SECONDS
-                ))
-        {
-            std::cout
-                << "\n[WARNING] RTP signal "
-                << "not available\n";
-
-            signalAvailable = false;
-
-            signalLossReported = true;
-
-            resetAssemblers();
-        }
-
-        const ssize_t received =
-            socket.receive(
-                receiveBuffer.data(),
-                receiveBuffer.size()
-            );
-
-        if (received < 0)
-        {
-            const int receiveError = errno;
-
-            if (stopRequested)
-            {
-                break;
-            }
-
-            if (receiveError == EINTR)
-            {
-                continue;
-            }
-
-            if (receiveError == EAGAIN ||
-                receiveError == EWOULDBLOCK)
-            {
-                ++stats.receiveTimeouts;
-
-                continue;
-            }
-
-            std::cerr
-                << "UDP receive error\n";
-
-            fatalError = true;
-
-            break;
-        }
-
-        ++stats.receivedDatagrams;
-
-        RtpPacket rtpPacket{};
-
-        if (!RtpParser::parse(
-                receiveBuffer.data(),
-                static_cast<std::size_t>(
-                    received
-                ),
-                rtpPacket
-            ) ||
-            rtpPacket.payloadType !=
-                RtpParser::MPEG_TS_PAYLOAD_TYPE ||
-            rtpPacket.payloadSize == 0 ||
-            rtpPacket.payloadSize %
-                TsParser::PACKET_SIZE != 0)
-        {
-            ++stats.invalidRtpPackets;
-
-            resetAssemblers();
-
-            continue;
-        }
-
-        if (!hasActiveSsrc)
-        {
-            activeSsrc = rtpPacket.ssrc;
-
-            hasActiveSsrc = true;
-
-            std::cout
-                << "\nActive RTP SSRC: "
-                << activeSsrc << '\n';
-        }
-
-        if (rtpPacket.ssrc != activeSsrc)
-        {
-            ++stats.unexpectedSsrcPackets;
-
-            continue;
-        }
-
-        ++stats.validRtpPackets;
-
-        if (!signalAvailable)
-        {
-            std::cout
-                << "\n[INFO] RTP signal available\n";
-
-            signalAvailable = true;
-
-            signalLossReported = false;
-        }
-
-        lastValidSignal =
-            std::chrono::steady_clock::now();
-
-        if (hasPreviousSequence)
-        {
-            const std::uint16_t expected =
-                static_cast<std::uint16_t>(
-                    previousSequence + 1
-                );
-
-            if (rtpPacket.sequenceNumber !=
-                expected)
-            {
-                ++stats.rtpDiscontinuities;
-
-                resetAssemblers();
-            }
-        }
-
-        previousSequence =
-            rtpPacket.sequenceNumber;
-
-        hasPreviousSequence = true;
-
-        std::size_t forwardSize = 0;
-
-        for (std::size_t offset = 0;
-             offset < rtpPacket.payloadSize;
-             offset += TsParser::PACKET_SIZE)
-        {
-            const std::uint8_t* tsData =
-                rtpPacket.payload + offset;
-
-            TsPacket tsPacket{};
-
-            if (!TsParser::parse(
-                    tsData,
-                    TsParser::PACKET_SIZE,
-                    tsPacket
-                ))
-            {
-                ++stats.invalidTsPackets;
-
-                resetAssemblers();
-
-                continue;
-            }
-
-            ++stats.validTsPackets;
-
-            if (tsPacket.transportError)
-            {
-                ++stats.transportErrors;
-
-                if (tsPacket.pid ==
-                    TsParser::PAT_PID)
-                {
-                    patAssembler.reset();
-                }
-
-                auto assembler =
-                    pmtAssemblers.find(
-                        tsPacket.pid
-                    );
-
-                if (assembler !=
-                    pmtAssemblers.end())
-                {
-                    assembler->second.reset();
-                }
-
-                continue;
-            }
-
-            // Data flow: preserve the complete
-            // valid 188-byte MPEG-TS packet.
-
-            for (std::size_t i = 0;
-                 i < TsParser::PACKET_SIZE;
-                 ++i)
-            {
-                forwardBuffer[forwardSize++] =
-                    tsData[i];
-            }
-
-            // Metadata flow: PAT processing.
-
-            if (tsPacket.pid ==
-                TsParser::PAT_PID)
-            {
-                const auto sections =
-                    patAssembler.push(tsPacket);
-
-                for (const auto& section :
-                     sections)
-                {
-                    PatTable table{};
-
-                    if (!PatParser::parse(
-                            section.data(),
-                            section.size(),
-                            table
-                        ))
-                    {
-                        ++stats.invalidPatSections;
-
-                        continue;
-                    }
-
-                    ++stats.validPatSections;
-
-                    const auto key =
-                        std::make_tuple(
-                            table.transportStreamId,
-                            table.versionNumber,
-                            table.sectionNumber,
-                            table.currentNextIndicator
-                        );
-
-                    if (printedPatSections
-                            .insert(key).second)
-                    {
-                        printPat(table);
-                    }
-
-                    if (!table.currentNextIndicator)
-                    {
-                        continue;
-                    }
-
-                    for (const auto& program :
-                         table.programs)
-                    {
-                        const auto previous =
-                            programs.find(
-                                program.programNumber
-                            );
-
-                        if (previous !=
-                                programs.end() &&
-                            previous->second !=
-                                program.pmtPid)
-                        {
-                            programTables.erase(
-                                program.programNumber
-                            );
-                        }
-
-                        programs[
-                            program.programNumber
-                        ] = program.pmtPid;
-
-                        pmtAssemblers.try_emplace(
-                            program.pmtPid,
-                            program.pmtPid
-                        );
-                    }
-                }
-
-                continue;
-            }
-
-            // Metadata flow: PMT processing.
-
-            auto assembler =
-                pmtAssemblers.find(
-                    tsPacket.pid
-                );
-
-            if (assembler ==
-                pmtAssemblers.end())
-            {
-                continue;
-            }
-
-            const auto sections =
-                assembler->second.push(tsPacket);
-
-            for (const auto& section :
-                 sections)
-            {
-                PmtTable table{};
-
-                if (!PmtParser::parse(
-                        section.data(),
-                        section.size(),
-                        table
-                    ))
-                {
-                    ++stats.invalidPmtSections;
-
-                    continue;
-                }
-
-                const auto program =
-                    programs.find(
-                        table.programNumber
-                    );
-
-                if (program == programs.end() ||
-                    program->second != tsPacket.pid)
-                {
-                    ++stats.unexpectedPmtSections;
-
-                    continue;
-                }
-
-                ++stats.validPmtSections;
-
-                const auto key =
-                    std::make_tuple(
-                        table.programNumber,
-                        tsPacket.pid,
-                        table.versionNumber,
-                        table.currentNextIndicator
-                    );
-
-                if (printedPmtSections
-                        .insert(key).second)
-                {
-                    printPmt(
-                        tsPacket.pid,
-                        table
-                    );
-                }
-
-                if (table.currentNextIndicator)
-                {
-                    programTables[
-                        table.programNumber
-                    ] = table;
-                }
-            }
-        }
-
-        // Forward MPEG-TS without the RTP header.
-
-        if (forwardSize > 0)
-        {
-            if (!segmenter.write(
-                    forwardBuffer.data(),
-                    forwardSize
-                ))
-            {
-                ++stats.hlsWriteErrors;
-
-                std::cerr
-                    << "Failed to forward "
-                    << "MPEG-TS to HLS segmenter\n";
-
-                fatalError = true;
-
-                break;
-            }
-
-            stats.forwardedBytes += forwardSize;
-        }
+        std::cerr
+            << "Failed to initialize HLS consumer: "
+            << consumer.lastError() << '\n';
+
+        return 1;
     }
 
+    std::thread producerThread;
+    std::thread consumerThread;
+
+    bool coordinatorError = false;
+
+    try
+    {
+        // Start consumer first.
+
+        consumerThread = std::thread(
+            &HlsConsumer::run,
+            &consumer
+        );
+
+        producerThread = std::thread(
+            &RtpProducer::run,
+            &producer
+        );
+
+        std::cout
+            << "\n[INFO] Worker threads started\n"
+            << "Queue capacity: "
+            << QUEUE_MAX_BYTES << " bytes\n"
+            << "Queue block limit: "
+            << QUEUE_MAX_BLOCKS << '\n'
+            << "Press Ctrl+C to stop\n";
+
+        auto lastStatistics =
+            std::chrono::steady_clock::now();
+
+        // Main thread coordinates the workers.
+
+        while (!stopRequested)
+        {
+            if (
+                producer.hasFatalError() ||
+                consumer.hasFatalError()
+            )
+            {
+                break;
+            }
+
+            if (
+                producer.isFinished() ||
+                consumer.isFinished()
+            )
+            {
+                coordinatorError = true;
+
+                std::cerr
+                    << "[ERROR] Worker finished "
+                    << "unexpectedly\n";
+
+                break;
+            }
+
+            const auto now =
+                std::chrono::steady_clock::now();
+
+            if (
+                now - lastStatistics >=
+                STATISTICS_INTERVAL
+            )
+            {
+                printStatistics(
+                    producer,
+                    consumer,
+                    queue
+                );
+
+                lastStatistics = now;
+            }
+
+            std::this_thread::sleep_for(
+                CONTROL_INTERVAL
+            );
+        }
+    }
+    catch (const std::exception& error)
+    {
+        coordinatorError = true;
+
+        std::cerr
+            << "[ERROR] Coordinator exception: "
+            << error.what() << '\n';
+    }
+    catch (...)
+    {
+        coordinatorError = true;
+
+        std::cerr
+            << "[ERROR] Unknown coordinator exception\n";
+    }
+
+    // Shutdown sequence.
+
     std::cout
-        << "\nStopping IPTV receiver...\n";
+        << "\n[INFO] Stopping IPTV receiver...\n";
 
-    socket.close();
+    producer.requestStop();
 
-    segmenter.stop();
-    if (!fatalError && !updateBuffer()) fatalError = true;
+    if (
+        coordinatorError ||
+        producer.hasFatalError() ||
+        consumer.hasFatalError()
+    )
+    {
+        queue.abort();
+    }
 
-    printStatistics(stats);
+    // Stop producer before closing the queue.
 
-    std::cout
-        << "Detected programs: "
-        << programs.size() << '\n';
+    if (producerThread.joinable())
+    {
+        producerThread.join();
+    }
 
-    std::cout
-        << "Resolved PMT tables: "
-        << programTables.size() << '\n';
+    // Wake consumer and allow remaining data to drain.
 
-    if (fatalError)
+    queue.close();
+
+    if (consumerThread.joinable())
+    {
+        consumerThread.join();
+    }
+
+    // Both worker threads have finished.
+
+    printStatistics(
+        producer,
+        consumer,
+        queue
+    );
+
+    if (producer.hasFatalError())
+    {
+        std::cerr
+            << "[ERROR] Producer: "
+            << producer.lastError() << '\n';
+    }
+
+    if (consumer.hasFatalError())
+    {
+        std::cerr
+            << "[ERROR] Consumer: "
+            << consumer.lastError() << '\n';
+    }
+
+    if (
+        coordinatorError ||
+        producer.hasFatalError() ||
+        consumer.hasFatalError()
+    )
     {
         std::cerr
             << "Receiver stopped due to error\n";

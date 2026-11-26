@@ -483,3 +483,105 @@ set_tests_properties(
 )
 
 target_link_libraries(iptv_backend PRIVATE iptv_hls_buffer iptv_hls_writer)
+
+# Bounded TS queue library
+
+find_package(Threads REQUIRED)
+
+add_library(iptv_ts_queue STATIC
+    src/BoundedTsQueue.cpp
+)
+
+target_include_directories(iptv_ts_queue PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_ts_queue PUBLIC
+    Threads::Threads
+)
+
+target_compile_options(iptv_ts_queue PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# Bounded TS queue tests
+
+add_executable(bounded_ts_queue_test
+    tests/BoundedTsQueueTest.cpp
+)
+
+target_link_libraries(bounded_ts_queue_test PRIVATE
+    iptv_ts_queue
+)
+
+target_compile_options(bounded_ts_queue_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME bounded_ts_queue_unit_test
+    COMMAND bounded_ts_queue_test
+)
+
+set_tests_properties(
+    bounded_ts_queue_unit_test
+    PROPERTIES TIMEOUT 10
+)
+# HLS consumer library
+
+add_library(iptv_hls_consumer STATIC
+    src/HlsConsumer.cpp
+)
+
+target_include_directories(iptv_hls_consumer PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_hls_consumer PUBLIC
+    iptv_ts_queue
+    iptv_hls
+    iptv_hls_buffer
+    iptv_hls_writer
+    Threads::Threads
+)
+
+target_compile_options(iptv_hls_consumer PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# RTP producer library
+
+add_library(iptv_rtp_producer STATIC
+    src/RtpProducer.cpp
+)
+
+target_include_directories(iptv_rtp_producer PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(iptv_rtp_producer PUBLIC
+    iptv_udp
+    iptv_rtp
+    iptv_ts
+    iptv_psi
+    iptv_ts_queue
+    Threads::Threads
+)
+
+target_compile_options(iptv_rtp_producer PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# Producer-consumer backend integration
+
+target_link_libraries(iptv_backend PRIVATE
+    iptv_rtp_producer
+    iptv_hls_consumer
+    iptv_ts_queue
+    Threads::Threads
+)
