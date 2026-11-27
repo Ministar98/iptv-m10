@@ -1,3 +1,9 @@
+import {
+    openGuide,
+    closeGuide,
+    isGuideOpen
+} from "./guide.js";
+import { showInfo, toggleInfo, hideInfo } from "./info.js";
 import Hls from "hls.js";
 import { api } from "./api.js";
 
@@ -484,6 +490,14 @@ function applySession(snapshot) {
 
     session = snapshot;
 
+	if (generationChanged) {
+	    hideInfo();
+
+	    if (started && snapshot.activeService) {
+	        showInfo(snapshot.activeService);
+	    }
+	}
+
     $("generation").textContent = snapshot.generationId;
     $("source").textContent = snapshot.hlsUrl ?? "--";
 
@@ -885,6 +899,213 @@ function disconnectEvents() {
 
     if (socket) socket.close();
 }
+
+$("epg-button").onclick = () => {
+    hideInfo();
+    openGuide(services, session?.serviceId);
+};
+let channelDigits = "";
+let channelInputTimer = null;
+
+function clearChannelInput() {
+    clearTimeout(channelInputTimer);
+
+    channelDigits = "";
+    $("channel-number").value = "";
+}
+
+function changeVolume(delta) {
+    video.volume = clamp(video.volume + delta, 0, 1);
+
+    $("volume").value = String(video.volume);
+}
+
+function seekRelative(deltaSeconds) {
+    if (!started || !session?.playback.bufferAvailable) {
+        return;
+    }
+
+    const offset = mediaOffset();
+
+    if (offset === null) return;
+
+    const playback = session.playback;
+
+    const target = clamp(
+        video.currentTime + offset + deltaSeconds,
+        playback.earliestMs / 1000,
+        playback.latestMs / 1000
+    );
+
+    seekToPosition(target);
+}
+
+function togglePause() {
+    if (!started || !session?.playback.bufferAvailable) {
+        return;
+    }
+
+    if (session.playback.state === "PAUSED") {
+        playbackCommand(
+            generationId => api.resume(generationId)
+        );
+    } else {
+        playbackCommand(
+            generationId => api.pause(generationId)
+        );
+    }
+}
+
+function toggleMute() {
+    video.muted = !video.muted;
+
+    $("mute").checked = video.muted;
+}
+
+function handleRemoteKey(event) {
+    if (event.ctrlKey || event.altKey || event.metaKey) {
+        return;
+    }
+
+    const key = event.key.toLowerCase();
+
+    if (isGuideOpen()) {
+        if (key === "escape" || key === "e") {
+            event.preventDefault();
+            closeGuide();
+        }
+
+        return;
+    }
+
+    if (key === "escape") {
+        hideInfo();
+        clearChannelInput();
+        return;
+    }
+
+    if (
+        event.target instanceof HTMLElement &&
+        (
+            event.target.matches("input, select, textarea") ||
+            event.target.isContentEditable
+        )
+    ) {
+        return;
+    }
+
+    if (
+        event.repeat &&
+        !["arrowleft", "arrowright", "+", "=", "-"].includes(key)
+    ) {
+        return;
+    }
+
+    if (/^[0-9]$/.test(key)) {
+        event.preventDefault();
+
+        if (channelDigits.length >= 3) {
+            channelDigits = "";
+        }
+
+        channelDigits += key;
+
+        $("channel-number").value = channelDigits;
+
+        status(`Channel: ${channelDigits}`);
+
+        clearTimeout(channelInputTimer);
+
+        channelInputTimer = setTimeout(
+            clearChannelInput,
+            4000
+        );
+
+        return;
+    }
+
+    switch (key) {
+        case "arrowup":
+            changeChannel(1);
+            break;
+
+        case "arrowdown":
+            changeChannel(-1);
+            break;
+
+        case "arrowleft":
+            seekRelative(-10);
+            break;
+
+        case "arrowright":
+            seekRelative(10);
+            break;
+
+        case "enter":
+            if (channelDigits !== "") {
+                selectChannelNumber();
+                clearChannelInput();
+            } else {
+                return;
+            }
+            break;
+
+        case " ":
+            if (started) {
+                togglePause();
+            } else {
+                startPlayback();
+            }
+            break;
+
+        case "+":
+        case "=":
+            changeVolume(0.05);
+            break;
+
+        case "-":
+            changeVolume(-0.05);
+            break;
+
+        case "m":
+            toggleMute();
+            break;
+
+        case "i":
+            if (started && session?.activeService) {
+                toggleInfo(session.activeService);
+            }
+            break;
+
+        case "e":
+            hideInfo();
+            openGuide(services, session?.serviceId);
+            break;
+
+        case "l":
+            if (started) {
+                playbackCommand(
+                    generationId => api.goLive(generationId)
+                );
+            }
+            break;
+
+        case "backspace":
+            if (started && session?.playback.bufferAvailable) {
+                seekToPosition(
+                    session.playback.earliestMs / 1000
+                );
+            }
+            break;
+
+        default:
+            return;
+    }
+
+    event.preventDefault();
+}
+
+window.addEventListener("keydown", handleRemoteKey);
 
 async function initialize() {
     updateControls();

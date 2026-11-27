@@ -200,3 +200,98 @@ button:disabled:hover {
 #channel-name {
     margin: 15px 0;
 }
+.video-container {
+    position: relative;
+    width: 100%;
+}
+
+.video-container video {
+    display: block;
+    width: 100%;
+}
+
+#info-osd {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    right: 20px;
+    padding: 18px;
+    background: rgba(10, 15, 25, 0.92);
+    border-left: 4px solid #38bdf8;
+    border-radius: 6px;
+    color: white;
+    z-index: 10;
+    pointer-events: none;
+}
+
+#info-osd[hidden] {
+    display: none;
+}
+
+#info-channel {
+    font-size: 24px;
+    font-weight: bold;
+    margin-bottom: 12px;
+}
+
+#info-current {
+    font-size: 18px;
+    margin-bottom: 6px;
+}
+
+#info-next {
+    font-size: 16px;
+    color: #cbd5e1;
+}
+#epg-guide {
+    width: min(700px, 90vw);
+    padding: 20px;
+    background: #111827;
+    color: white;
+    border: 1px solid #475569;
+    border-radius: 8px;
+}
+
+#epg-guide::backdrop {
+    background: rgba(0, 0, 0, 0.65);
+}
+
+.guide-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.guide-program {
+    max-height: 55vh;
+    overflow-y: auto;
+}
+
+#guide-service {
+    width: 100%;
+    padding: 8px;
+}
+
+#epg-guide table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#epg-guide th,
+#epg-guide td {
+    padding: 10px;
+    text-align: left;
+    border-bottom: 1px solid #334155;
+}
+
+#epg-guide th {
+    position: sticky;
+    top: 0;
+    background: #1e293b;
+}
+
+.current-program {
+    background: #164e63;
+    font-weight: bold;
+}
