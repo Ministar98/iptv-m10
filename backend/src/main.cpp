@@ -950,27 +950,7 @@ int main()
 
             while (!stopRequested)
             {
-		if (!controller.update())
-		{
-		    const auto failedSession =
-		        controller.snapshot();
-
-		    stateCache.publish(
-		        failedSession,
-		        controller.statistics()
-		    );
-
-		    publishStateEvents(
-		        events,
-		        previousState,
-		        stateCache.snapshot()
-		    );
-
-		    failed = true;
-		    failureMessage = failedSession.errorMessage;
-
-		    break;
-		}
+		controller.update();
 
                 if (!worker.isRunning())
                 {

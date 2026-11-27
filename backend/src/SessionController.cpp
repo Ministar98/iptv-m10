@@ -601,6 +601,24 @@ void SessionController::failLocked(
         activeSession_.reset();
     }
 
+    if (generationId_ > 0)
+    {
+        std::error_code ec;
+
+        std::filesystem::remove_all(
+            hlsConfig_.outputDirectory /
+                std::to_string(generationId_),
+            ec
+        );
+
+        if (ec)
+        {
+            lastError_ +=
+                "; HLS buffer cleanup failed: " +
+                ec.message();
+        }
+    }
+
     playback_.reset(generationId_);
 
     playback_.setError(lastError_);

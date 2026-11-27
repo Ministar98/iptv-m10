@@ -32,6 +32,7 @@ let commanding = false;
 let dragging = false;
 
 let appliedRevision = null;
+let hlsRecoveryAttempts = 0;
 let pendingSeek = null;
 let feedbackInProgress = false;
 let eventSocket = null;
@@ -240,19 +241,37 @@ function loadPlayer() {
         updateControls();
     });
 
-    instance.on(Hls.Events.ERROR, (_, data) => {
-        if (hls !== instance) return;
+	instance.on(Hls.Events.ERROR, (_, data) => {
+	    if (hls !== instance) return;
 
-        console.warn("HLS", data);
+	    console.warn("HLS", data);
 
-        if (data.fatal) {
-            destroyPlayer();
-            started = false;
+	    if (!data.fatal) return;
 
-            status(`HLS error: ${data.details}`);
-            updateControls();
-        }
-    });
+	    if (hlsRecoveryAttempts < 3) {
+	        hlsRecoveryAttempts++;
+
+	        status(
+	            `Recovering playback (${hlsRecoveryAttempts}/3)...`
+	        );
+
+	        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+	            instance.startLoad();
+	            return;
+	        }
+
+	        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+	            instance.recoverMediaError();
+	            return;
+	        }
+	    }
+
+	    destroyPlayer();
+	    started = false;
+
+	    status(`HLS error: ${data.details}`);
+	    updateControls();
+	});
 
     instance.attachMedia(video);
 
@@ -485,6 +504,7 @@ function applySession(snapshot) {
         session?.generationId !== snapshot.generationId;
 
     if (generationChanged) {
+	hlsRecoveryAttempts = 0;
         destroyPlayer();
     }
 
@@ -610,10 +630,20 @@ function changeChannel(direction) {
         service => service.serviceId === session.serviceId
     );
 
-    if (index < 0) return;
+    if (index < 0) {
+        const fallbackIndex =
+            direction > 0 ? 0 : services.length - 1;
+
+        selectService(
+            services[fallbackIndex].serviceId
+        );
+
+        return;
+    }
 
     const nextIndex =
-        (index + direction + services.length) % services.length;
+        (index + direction + services.length) %
+        services.length;
 
     selectService(services[nextIndex].serviceId);
 }
@@ -660,6 +690,8 @@ function startPlayback() {
     if (!session?.hlsUrl) return;
 
     started = true;
+
+    hlsRecoveryAttempts = 0;
 
     loadPlayer();
 
