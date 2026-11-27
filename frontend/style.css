@@ -170,3 +170,33 @@ button:disabled:hover {
 #seek-position { width: 110px; padding: 8px; margin: 8px; }
 .information label { margin-right: 10px; }
 .mode-seeking { color: #79b8ff; }
+.channel-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.channel-controls select,
+.channel-controls input {
+    padding: 12px;
+    background: #272c35;
+    color: #ffffff;
+    border: 1px solid #555555;
+    border-radius: 5px;
+    font-size: 16px;
+}
+
+#service-list {
+    flex: 1;
+    min-width: 150px;
+}
+
+#channel-number {
+    width: 90px;
+}
+
+#channel-name {
+    margin: 15px 0;
+}
