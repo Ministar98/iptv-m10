@@ -1,7 +1,14 @@
 #include "SessionController.hpp"
-
 #include "OttMetadataManager.hpp"
-#include <utility>
+#include "ControlCommandQueue.hpp"
+#include "ControlCommandExecutor.hpp"
+#include "ControlWorker.hpp"
+#include "EventQueue.hpp"
+#include "ApiOperationJson.hpp"
+#include "ApiStateCache.hpp"
+#include "ApiRequestHandler.hpp"
+#include "HttpServer.hpp"
+
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -9,6 +16,8 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <filesystem>
 
 #include <poll.h>
 #include <unistd.h>
@@ -33,13 +42,18 @@ void printCommands()
 {
     std::cout
         << "\n========== IPTV M10 ==========\n"
-        << "n     - Next channel\n"
-        << "p     - Previous channel\n"
-        << "NUM   - Select channel\n"
-        << "s     - Statistics\n"
-        << "l     - Service list\n"
-        << "h     - Help\n"
-        << "q     - Quit\n"
+        << "n          - Next channel\n"
+        << "p          - Previous channel\n"
+        << "NUM        - Select channel\n"
+        << "pause      - Pause playback\n"
+        << "resume     - Resume playback\n"
+        << "seek MS    - Seek to absolute position\n"
+        << "live       - Go live\n"
+        << "oldest     - Go to oldest position\n"
+        << "s          - Statistics\n"
+        << "l          - Service list\n"
+        << "h          - Help\n"
+        << "q          - Quit\n"
         << "==============================\n";
 }
 
@@ -60,36 +74,35 @@ void printServices(const ServiceManager& manager)
 }
 
 void printStatistics(
-    const SessionController& controller
+    const SessionController& controller,
+    const ControlCommandQueue& commands,
+    const ControlWorker& worker,
+    const EventQueue& events
 )
 {
     const auto session = controller.snapshot();
-
     const auto statistics = controller.statistics();
+    const auto workerStats = worker.statistics();
+    const auto eventStats = events.statistics();
 
     const auto& playback = session.playback;
 
     std::cout
         << "\n========== IPTV Statistics ==========\n"
         << "Session state: "
-        << sessionStateToString(session.state)
-        << '\n'
+        << sessionStateToString(session.state) << '\n'
         << "Generation ID: "
-        << session.generationId
-        << '\n';
+        << session.generationId << '\n';
 
     if (session.activeService)
     {
         std::cout
             << "Active service: "
-            << session.activeService->name
-            << '\n'
+            << session.activeService->name << '\n'
             << "Service ID: "
-            << session.activeService->serviceId
-            << '\n'
+            << session.activeService->serviceId << '\n'
             << "Channel number: "
-            << session.activeService->channelNumber
-            << '\n';
+            << session.activeService->channelNumber << '\n';
     }
 
     if (statistics)
@@ -224,8 +237,7 @@ void printStatistics(
     std::cout
         << "\n--- Playback Manager ---\n"
         << "Playback state: "
-        << playbackStateToString(playback.state)
-        << '\n'
+        << playbackStateToString(playback.state) << '\n'
         << "Buffer available: "
         << playback.bufferAvailable << '\n'
         << "Oldest position ms: "
@@ -257,23 +269,246 @@ void printStatistics(
         << (session.errorMessage.empty()
                 ? "NONE"
                 : session.errorMessage)
-        << '\n'
+        << '\n';
+
+    std::cout
+        << "\n--- Control Command Queue ---\n"
+        << "Pending commands: "
+        << commands.size() << '\n'
+        << "Queue capacity: "
+        << commands.capacity() << '\n'
+        << "Queue closed: "
+        << commands.isClosed() << '\n';
+
+    std::cout
+        << "\n--- Control Worker ---\n"
+        << "Worker running: "
+        << worker.isRunning() << '\n'
+        << "Processed: "
+        << workerStats.processed << '\n'
+        << "Completed: "
+        << workerStats.completed << '\n'
+        << "Rejected: "
+        << workerStats.rejected << '\n'
+        << "Failed: "
+        << workerStats.failed << '\n'
+        << "Callback errors: "
+        << workerStats.callbackErrors << '\n';
+
+    std::cout
+        << "\n--- Event Queue ---\n"
+        << "Published events: "
+        << eventStats.published << '\n'
+        << "Consumed events: "
+        << eventStats.consumed << '\n'
+        << "Dropped events: "
+        << eventStats.dropped << '\n'
+        << "Queued events: "
+        << eventStats.queued << '\n'
+        << "Peak queued events: "
+        << eventStats.peakQueued << '\n'
+        << "Rejected closed events: "
+        << eventStats.rejectedClosed << '\n'
         << "=====================================\n";
 }
 
-void processCommand(
-    const std::string& command,
-    SessionController& controller,
-    const ServiceManager& services
+const char* submitStatusToString(
+    CommandSubmitStatus status
 )
 {
-    std::istringstream input(command);
+    switch (status)
+    {
+        case CommandSubmitStatus::Accepted:
+            return "ACCEPTED";
+
+        case CommandSubmitStatus::Full:
+            return "QUEUE_FULL";
+
+        case CommandSubmitStatus::Closed:
+            return "QUEUE_CLOSED";
+
+        case CommandSubmitStatus::IdExhausted:
+            return "OPERATION_ID_EXHAUSTED";
+    }
+
+    return "UNKNOWN";
+}
+
+void publishStateEvents(
+    EventQueue& events,
+    const ApiStateSnapshot& previous,
+    const ApiStateSnapshot& current
+)
+{
+    const auto& session = current.session;
+    const auto& playback = session.playback;
+    const auto& oldPlayback = previous.session.playback;
+
+    const bool newGeneration =
+        !previous.initialized ||
+        previous.session.generationId !=
+            session.generationId;
+
+    ApiJson::Context context;
+
+    context.generationId = session.generationId;
+
+    context.sessionId =
+        session.activeService
+            ? session.generationId
+            : 0;
+
+    const auto publish =
+        [&](const std::string& type,
+            const ApiJson::Json& payload)
+        {
+            events.publish(
+                ApiJson::event(type, context, payload)
+            );
+        };
+
+    const auto sessionData = ApiJson::session(session);
+    const auto playbackData = ApiJson::playback(playback);
+
+    if (newGeneration && session.activeService)
+    {
+        publish("CHANNEL_STARTING", sessionData);
+    }
+
+    if (session.state == SessionState::Error &&
+        (newGeneration ||
+         previous.session.state != SessionState::Error))
+    {
+        publish("CHANNEL_FAILED", sessionData);
+
+        publish("ERROR", {
+            {"code", "SESSION_ERROR"},
+            {"message", session.errorMessage},
+            {"retryable", true}
+        });
+    }
+
+    if (current.statistics)
+    {
+        const auto& producer =
+            current.statistics->producer;
+
+        const bool previousSignal =
+            !newGeneration &&
+            previous.statistics &&
+            previous.statistics->producer.signalAvailable;
+
+        if (previousSignal && !producer.signalAvailable)
+        {
+            publish("RTP_SIGNAL_LOST", {
+                {"signalAvailable", false}
+            });
+        }
+
+        if (!newGeneration &&
+            previous.statistics &&
+            !previousSignal &&
+            producer.signalAvailable &&
+            previous.statistics->producer.validRtpPackets > 0)
+        {
+            publish("RTP_SIGNAL_RECOVERED", {
+                {"signalAvailable", true}
+            });
+        }
+
+        if (producer.resolvedPmtTables > 0 &&
+            (newGeneration ||
+             !previous.statistics ||
+             previous.statistics->producer.resolvedPmtTables !=
+                 producer.resolvedPmtTables ||
+             previous.statistics->producer.programs !=
+                 producer.programs))
+        {
+            publish("PSI_UPDATED", {
+                {"detectedPrograms", producer.detectedPrograms},
+                {"resolvedPmtTables", producer.resolvedPmtTables}
+            });
+        }
+    }
+
+    if (playback.bufferAvailable &&
+        (newGeneration || !oldPlayback.bufferAvailable))
+    {
+        publish("CHANNEL_READY", sessionData);
+        publish("PLAYBACK_READY", playbackData);
+    }
+
+    if (newGeneration ||
+        playback.bufferAvailable != oldPlayback.bufferAvailable ||
+        playback.oldestPositionMs != oldPlayback.oldestPositionMs ||
+        playback.livePositionMs != oldPlayback.livePositionMs)
+    {
+        publish("BUFFER_WINDOW_UPDATED", playbackData);
+    }
+
+    if (newGeneration ||
+        playback.state != oldPlayback.state ||
+        playback.playbackPositionMs !=
+            oldPlayback.playbackPositionMs ||
+        playback.seekRequired != oldPlayback.seekRequired ||
+        playback.seekRevision != oldPlayback.seekRevision)
+    {
+        publish("PLAYBACK_POSITION", playbackData);
+    }
+
+    if (playback.positionExpired &&
+        (newGeneration ||
+         !oldPlayback.positionExpired ||
+         playback.seekRevision != oldPlayback.seekRevision))
+    {
+        publish("BUFFER_POSITION_CLAMPED", playbackData);
+    }
+}
+
+void drainEvents(EventQueue& events)
+{
+    while (const auto event = events.tryPop())
+    {
+        std::cout
+            << "\n[EVENT] "
+            << event->dump()
+            << '\n';
+    }
+}
+
+void processCommand(
+    const std::string& line,
+    SessionController& controller,
+    const ServiceManager& services,
+    ControlCommandQueue& commands,
+    const ControlWorker& worker,
+    EventQueue& events,
+    std::uint64_t generationId,
+    std::uint64_t& requestCounter
+)
+{
+    std::istringstream input(line);
 
     std::string value;
 
     if (!(input >> value))
     {
         return;
+    }
+
+    ControlCommand command;
+
+    if (value == "seek")
+    {
+        if (!(input >> command.seekPositionMs))
+        {
+            std::cerr
+                << "[WARNING] Usage: seek MS\n";
+
+            return;
+        }
+
+        command.type = ControlCommandType::Seek;
     }
 
     std::string extra;
@@ -285,25 +520,26 @@ void processCommand(
         return;
     }
 
-    bool success = false;
-
     if (value == "q")
     {
         stopRequested = 1;
-
         return;
     }
 
     if (value == "h")
     {
         printCommands();
-
         return;
     }
 
     if (value == "s")
     {
-        printStatistics(controller);
+        printStatistics(
+            controller,
+            commands,
+            worker,
+            events
+        );
 
         return;
     }
@@ -311,19 +547,40 @@ void processCommand(
     if (value == "l")
     {
         printServices(services);
-
         return;
     }
 
     if (value == "n")
     {
-        success = controller.nextChannel();
+        command.type =
+            ControlCommandType::NextChannel;
     }
     else if (value == "p")
     {
-        success = controller.previousChannel();
+        command.type =
+            ControlCommandType::PreviousChannel;
     }
-    else
+    else if (value == "pause")
+    {
+        command.type =
+            ControlCommandType::Pause;
+    }
+    else if (value == "resume")
+    {
+        command.type =
+            ControlCommandType::Resume;
+    }
+    else if (value == "live")
+    {
+        command.type =
+            ControlCommandType::GoLive;
+    }
+    else if (value == "oldest")
+    {
+        command.type =
+            ControlCommandType::GoOldest;
+    }
+    else if (value != "seek")
     {
         unsigned int channelNumber = 0;
 
@@ -342,38 +599,51 @@ void processCommand(
             return;
         }
 
-        success =
-            controller.selectChannel(channelNumber);
+        command.type =
+            ControlCommandType::SelectChannel;
+
+        command.channelNumber = channelNumber;
     }
 
-    if (!success)
+    command.generationId = generationId;
+
+    command.requestId =
+        "cli-" + std::to_string(++requestCounter);
+
+    const auto submitted = commands.submit(command);
+
+    if (!submitted.accepted())
     {
         std::cerr
-            << "[WARNING] Channel selection failed\n";
+            << "[WARNING] Command rejected: "
+            << submitStatusToString(submitted.status)
+            << '\n';
 
         return;
     }
 
-    const auto snapshot = controller.snapshot();
-
-    if (snapshot.activeService)
-    {
-        std::cout
-            << "[INFO] Selected channel: "
-            << snapshot.activeService->channelNumber
-            << " - "
-            << snapshot.activeService->name
-            << ", generation: "
-            << snapshot.generationId
-            << '\n';
-    }
+    std::cout
+        << "[ACCEPTED] "
+        << controlCommandTypeToString(command.type)
+        << ", requestId: "
+        << command.requestId
+        << ", operationId: "
+        << submitted.operationId
+        << ", generationId: "
+        << command.generationId
+        << '\n';
 }
 
 void pollCommands(
     SessionController& controller,
     const ServiceManager& services,
+    ControlCommandQueue& commands,
+    const ControlWorker& worker,
+    EventQueue& events,
     std::string& pendingInput,
-    bool& inputAvailable
+    bool& inputAvailable,
+    std::uint64_t generationId,
+    std::uint64_t& requestCounter
 )
 {
     pollfd descriptor{};
@@ -386,9 +656,7 @@ void pollCommands(
     const int result = ::poll(
         &descriptor,
         1,
-        static_cast<int>(
-            CONTROL_INTERVAL.count()
-        )
+        static_cast<int>(CONTROL_INTERVAL.count())
     );
 
     if (result < 0)
@@ -406,6 +674,21 @@ void pollCommands(
         return;
     }
 
+    const auto handleLine =
+        [&](const std::string& line)
+        {
+            processCommand(
+                line,
+                controller,
+                services,
+                commands,
+                worker,
+                events,
+                generationId,
+                requestCounter
+            );
+        };
+
     if (descriptor.revents & (POLLIN | POLLHUP))
     {
         char buffer[256];
@@ -420,17 +703,11 @@ void pollCommands(
         {
             if (!pendingInput.empty())
             {
-                processCommand(
-                    pendingInput,
-                    controller,
-                    services
-                );
-
+                handleLine(pendingInput);
                 pendingInput.clear();
             }
 
             inputAvailable = false;
-
             return;
         }
 
@@ -455,16 +732,12 @@ void pollCommands(
                (newline = pendingInput.find('\n'))
                    != std::string::npos)
         {
-            const std::string command =
+            const std::string line =
                 pendingInput.substr(0, newline);
 
             pendingInput.erase(0, newline + 1);
 
-            processCommand(
-                command,
-                controller,
-                services
-            );
+            handleLine(line);
         }
 
         if (pendingInput.size() > 4096)
@@ -482,7 +755,7 @@ void pollCommands(
     }
 }
 
-}
+} // namespace
 
 int main()
 {
@@ -497,8 +770,9 @@ int main()
         std::cout
             << "[INFO] Loading TV services from OTT Middleware\n";
 
-	OttMetadataManager ottMetadata;
-	auto catalog = ottMetadata.getServices();
+        OttMetadataManager ottMetadata;
+
+        auto catalog = ottMetadata.getServices();
 
         if (!catalog.success())
         {
@@ -571,10 +845,48 @@ int main()
         bufferConfig.deletionGrace =
             std::chrono::milliseconds(30000);
 
+	std::filesystem::remove_all(
+	    hlsConfig.outputDirectory
+	);
+
+	std::filesystem::create_directories(
+	    hlsConfig.outputDirectory
+	);
+
         SessionController controller(
             services,
             hlsConfig,
             bufferConfig
+        );
+
+        ControlCommandQueue commands(128);
+        EventQueue events(256);
+	ApiStateCache stateCache;
+
+	ApiRequestHandler apiHandler(
+	    services,
+	    stateCache,
+	    ottMetadata,
+	    commands
+	);
+
+	HttpServer httpServer(apiHandler, events, 8080);
+
+        ControlCommandExecutor executor(controller);
+
+        ControlWorker worker(
+            commands,
+            executor,
+            [&](const ControlOperationResult& result)
+            {
+                if (!events.publish(
+                        ApiJson::operationResult(result)))
+                {
+                    throw std::runtime_error(
+                        "Operation event publication failed"
+                    );
+                }
+            }
         );
 
         bool failed = false;
@@ -593,8 +905,36 @@ int main()
                 return 1;
             }
 
-            printCommands();
+            if (!worker.start())
+            {
+                controller.stop();
 
+                std::cerr
+                    << "[ERROR] Control worker startup failed\n";
+
+                return 1;
+            }
+
+            std::cout
+                << "[INFO] Asynchronous control pipeline started\n";
+
+	stateCache.publish(
+	    controller.snapshot(),
+	    controller.statistics()
+	);
+
+	if (!httpServer.start())
+	{
+	    worker.stop();
+	    controller.stop();
+
+	    std::cerr
+	        << "[ERROR] HTTP server startup failed\n";
+
+	    return 1;
+	}
+
+            printCommands();
             printServices(services);
 
             auto lastStatistics =
@@ -604,23 +944,84 @@ int main()
 
             std::string pendingInput;
 
+            std::uint64_t requestCounter = 0;
+
+	    ApiStateSnapshot previousState;
+
             while (!stopRequested)
             {
-                if (!controller.update())
+		if (!controller.update())
+		{
+		    const auto failedSession =
+		        controller.snapshot();
+
+		    stateCache.publish(
+		        failedSession,
+		        controller.statistics()
+		    );
+
+		    publishStateEvents(
+		        events,
+		        previousState,
+		        stateCache.snapshot()
+		    );
+
+		    failed = true;
+		    failureMessage = failedSession.errorMessage;
+
+		    break;
+		}
+
+                if (!worker.isRunning())
                 {
                     failed = true;
 
                     failureMessage =
-                        controller.snapshot().errorMessage;
+                        "Control worker stopped unexpectedly";
 
                     break;
                 }
 
+		if (!httpServer.isRunning())
+		{
+		    failed = true;
+		    failureMessage = "HTTP server stopped unexpectedly";
+		    break;
+		}
+
+		const auto session = controller.snapshot();
+
+		const auto statistics = controller.statistics();
+
+		if (controller.snapshot().generationId ==
+		    session.generationId)
+		{
+		    if (stateCache.publish(session, statistics))
+		    {
+		        const auto currentState =
+		            stateCache.snapshot();
+
+		        publishStateEvents(
+		            events,
+		            previousState,
+		            currentState
+		        );
+
+		        previousState = currentState;
+		    }
+		}
+		const auto generationId = session.generationId;
+
                 pollCommands(
                     controller,
                     services,
+                    commands,
+                    worker,
+                    events,
                     pendingInput,
-                    inputAvailable
+                    inputAvailable,
+                    generationId,
+                    requestCounter
                 );
 
                 const auto now =
@@ -629,7 +1030,12 @@ int main()
                 if (now - lastStatistics >=
                     STATISTICS_INTERVAL)
                 {
-                    printStatistics(controller);
+                    printStatistics(
+                        controller,
+                        commands,
+                        worker,
+                        events
+                    );
 
                     lastStatistics = now;
                 }
@@ -638,27 +1044,65 @@ int main()
         catch (const std::exception& error)
         {
             failed = true;
-
             failureMessage = error.what();
-
-            std::cerr
-                << "[ERROR] "
-                << failureMessage
-                << '\n';
         }
         catch (...)
         {
             failed = true;
-
             failureMessage = "Unknown error";
-
-            std::cerr
-                << "[ERROR] "
-                << failureMessage
-                << '\n';
         }
 
-        printStatistics(controller);
+	httpServer.stop();
+
+        std::cout
+            << "[INFO] Stopping control pipeline\n";
+
+        worker.stop();
+
+        events.close();
+
+        printStatistics(
+            controller,
+            commands,
+            worker,
+            events
+        );
+
+        const auto workerStats = worker.statistics();
+        const auto eventStats = events.statistics();
+
+        const auto beforeStop = controller.snapshot();
+
+        if (beforeStop.state == SessionState::Error)
+        {
+            failed = true;
+
+            if (failureMessage.empty())
+            {
+                failureMessage =
+                    beforeStop.errorMessage;
+            }
+        }
+
+	if (eventStats.dropped != 0)
+	{
+	    std::cerr
+	        << "[WARNING] Dropped WebSocket events: "
+	        << eventStats.dropped << '\n';
+	}
+
+	if (workerStats.callbackErrors != 0)
+        {
+            failed = true;
+
+            if (!failureMessage.empty())
+            {
+                failureMessage += "; ";
+            }
+
+            failureMessage +=
+                "Control operation events were lost";
+        }
 
         controller.stop();
 

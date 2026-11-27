@@ -873,3 +873,436 @@ set_tests_properties(
     ott_metadata_fault_unit_test
     PROPERTIES TIMEOUT 25
 )
+# Session playback control integration test
+
+add_executable(session_playback_control_test
+    tests/SessionPlaybackControlTest.cpp
+)
+
+target_link_libraries(session_playback_control_test PRIVATE
+    iptv_session
+)
+
+target_compile_options(session_playback_control_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# HTTP and WebSocket JSON models
+
+add_library(iptv_api_json STATIC
+    src/ApiJson.cpp
+)
+
+target_include_directories(iptv_api_json PUBLIC
+    include
+)
+
+target_link_libraries(iptv_api_json PUBLIC
+    nlohmann_json::nlohmann_json
+)
+
+target_compile_options(iptv_api_json PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_executable(api_json_test
+    tests/ApiJsonTest.cpp
+)
+
+target_link_libraries(api_json_test PRIVATE
+    iptv_api_json
+)
+
+target_compile_options(api_json_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME api_json_unit_test
+    COMMAND api_json_test
+)
+
+set_tests_properties(
+    api_json_unit_test
+    PROPERTIES TIMEOUT 5
+)
+# Asynchronous control command queue
+
+add_library(iptv_control_queue STATIC
+    src/ControlCommandQueue.cpp
+)
+
+target_include_directories(iptv_control_queue PUBLIC
+    include
+)
+
+target_link_libraries(iptv_control_queue PUBLIC
+    Threads::Threads
+)
+
+target_compile_options(iptv_control_queue PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_executable(control_command_queue_test
+    tests/ControlCommandQueueTest.cpp
+)
+
+target_link_libraries(control_command_queue_test PRIVATE
+    iptv_control_queue
+)
+
+target_compile_options(control_command_queue_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME control_command_queue_unit_test
+    COMMAND control_command_queue_test
+)
+
+set_tests_properties(
+    control_command_queue_unit_test
+    PROPERTIES TIMEOUT 10
+)
+# Control command executor
+
+add_library(iptv_control_executor STATIC
+    src/ControlCommandExecutor.cpp
+)
+
+target_include_directories(iptv_control_executor PUBLIC
+    include
+)
+
+target_link_libraries(iptv_control_executor PUBLIC
+    iptv_session
+)
+
+target_compile_options(iptv_control_executor PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_executable(control_command_executor_test
+    tests/ControlCommandExecutorTest.cpp
+)
+
+target_link_libraries(control_command_executor_test PRIVATE
+    iptv_control_executor
+    iptv_control_queue
+)
+
+target_compile_options(control_command_executor_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME control_command_executor_unit_test
+    COMMAND control_command_executor_test
+)
+
+set_tests_properties(
+    control_command_executor_unit_test
+    PROPERTIES TIMEOUT 5
+)
+# Asynchronous control worker
+
+add_library(iptv_control_worker STATIC
+    src/ControlWorker.cpp
+)
+
+target_include_directories(iptv_control_worker PUBLIC
+    include
+)
+
+target_link_libraries(iptv_control_worker PUBLIC
+    iptv_control_queue
+    iptv_control_executor
+    Threads::Threads
+)
+
+target_compile_options(iptv_control_worker PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_executable(control_worker_test
+    tests/ControlWorkerTest.cpp
+)
+
+target_link_libraries(control_worker_test PRIVATE
+    iptv_control_worker
+)
+
+target_compile_options(control_worker_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME control_worker_unit_test
+    COMMAND control_worker_test
+)
+
+set_tests_properties(
+    control_worker_unit_test
+    PROPERTIES TIMEOUT 10
+)
+# Operation events and WebSocket event queue
+
+add_library(iptv_events STATIC
+    src/EventQueue.cpp
+    src/ApiOperationJson.cpp
+)
+
+target_include_directories(iptv_events PUBLIC
+    include
+)
+
+target_link_libraries(iptv_events PUBLIC
+    iptv_api_json
+    iptv_control_executor
+    Threads::Threads
+)
+
+target_compile_options(iptv_events PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_executable(event_queue_test
+    tests/EventQueueTest.cpp
+)
+
+target_link_libraries(event_queue_test PRIVATE
+    iptv_events
+)
+
+target_compile_options(event_queue_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME event_queue_unit_test
+    COMMAND event_queue_test
+)
+
+set_tests_properties(
+    event_queue_unit_test
+    PROPERTIES TIMEOUT 10
+)
+# Control pipeline integration test
+
+add_executable(control_pipeline_test
+    tests/ControlPipelineTest.cpp
+)
+
+target_link_libraries(control_pipeline_test PRIVATE
+    iptv_control_worker
+    iptv_events
+)
+
+target_compile_options(control_pipeline_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# Rapid channel switch integration test
+
+add_executable(rapid_channel_switch_test
+    tests/RapidChannelSwitchTest.cpp
+)
+
+target_link_libraries(rapid_channel_switch_test PRIVATE
+    iptv_control_worker
+    iptv_events
+)
+
+target_compile_options(rapid_channel_switch_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+# Asynchronous backend control pipeline
+
+target_link_libraries(iptv_backend PRIVATE
+    iptv_control_worker
+    iptv_events
+)
+# API state snapshot cache
+
+add_library(iptv_api_state STATIC
+    src/ApiStateCache.cpp
+)
+
+target_include_directories(iptv_api_state PUBLIC
+    include
+)
+
+target_link_libraries(iptv_api_state PUBLIC
+    iptv_session
+    Threads::Threads
+)
+
+target_compile_options(iptv_api_state PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_executable(api_state_cache_test
+    tests/ApiStateCacheTest.cpp
+)
+
+target_link_libraries(api_state_cache_test PRIVATE
+    iptv_api_state
+)
+
+target_compile_options(api_state_cache_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME api_state_cache_unit_test
+    COMMAND api_state_cache_test
+)
+
+set_tests_properties(
+    api_state_cache_unit_test
+    PROPERTIES TIMEOUT 10
+)
+# HTTP API routing
+
+add_library(iptv_api_router STATIC
+    src/ApiRouter.cpp
+)
+
+target_include_directories(iptv_api_router PUBLIC
+    include
+)
+
+target_compile_options(iptv_api_router PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_executable(api_router_test
+    tests/ApiRouterTest.cpp
+)
+
+target_link_libraries(api_router_test PRIVATE
+    iptv_api_router
+)
+
+target_compile_options(api_router_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME api_router_unit_test
+    COMMAND api_router_test
+)
+
+set_tests_properties(
+    api_router_unit_test
+    PROPERTIES TIMEOUT 5
+)
+# HTTP API request handler
+
+add_library(iptv_api_handler STATIC
+    src/ApiRequestHandler.cpp
+)
+
+target_include_directories(iptv_api_handler PUBLIC
+    include
+)
+
+target_link_libraries(iptv_api_handler PUBLIC
+    iptv_api_router
+    iptv_api_json
+    iptv_api_state
+    iptv_ott_metadata
+)
+
+target_compile_options(iptv_api_handler PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_executable(api_request_handler_test
+    tests/ApiRequestHandlerTest.cpp
+)
+
+target_link_libraries(api_request_handler_test PRIVATE
+    iptv_api_handler
+)
+
+target_compile_options(api_request_handler_test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+add_test(
+    NAME api_request_handler_unit_test
+    COMMAND api_request_handler_test
+)
+
+set_tests_properties(
+    api_request_handler_unit_test
+    PROPERTIES TIMEOUT 5
+)
+# HTTP server
+
+find_package(Boost REQUIRED COMPONENTS system)
+
+add_library(iptv_http_server STATIC
+    src/HttpServer.cpp
+)
+
+target_include_directories(iptv_http_server PUBLIC
+    include
+)
+
+target_link_libraries(iptv_http_server PUBLIC
+    iptv_api_handler
+    Boost::system
+    Threads::Threads
+)
+
+target_compile_options(iptv_http_server PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_link_libraries(iptv_backend PRIVATE
+    iptv_http_server
+)
+target_link_libraries(iptv_api_handler PUBLIC
+    iptv_control_queue
+)

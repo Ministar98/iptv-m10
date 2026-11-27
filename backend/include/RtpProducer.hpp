@@ -49,6 +49,9 @@ struct RtpProducerStatistics
     std::size_t detectedPrograms = 0;
     std::size_t resolvedPmtTables = 0;
 
+    std::map<std::uint16_t, std::uint16_t> programs;
+    std::map<std::uint16_t, PmtTable> programTables;
+
     bool signalAvailable = false;
 };
 

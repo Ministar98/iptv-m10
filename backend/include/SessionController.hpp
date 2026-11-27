@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 class SessionController
 {
@@ -40,6 +41,33 @@ public:
     bool nextChannel();
 
     bool previousChannel();
+
+    bool pause(std::uint64_t generationId);
+
+    bool resume(std::uint64_t generationId);
+
+    bool seek(
+        std::uint64_t generationId,
+        std::int64_t positionMs
+    );
+
+    bool goLive(std::uint64_t generationId);
+
+    bool goOldest(std::uint64_t generationId);
+
+    bool acknowledgeSeek(
+        std::uint64_t generationId,
+        std::uint64_t seekRevision,
+        std::uint64_t actualPositionMs
+    );
+
+    bool reportPlaybackPosition(
+        std::uint64_t generationId,
+        std::uint64_t seekRevision,
+        std::uint64_t positionMs
+    );
+
+    std::vector<TvService> services() const;
 
     bool update();
 
@@ -76,6 +104,10 @@ private:
     bool stopSessionLocked();
 
     bool updateLocked();
+
+    bool canControlPlaybackLocked(
+        std::uint64_t generationId
+    ) const;
 
     void failLocked(const std::string& message);
 };

@@ -1,5 +1,7 @@
 #include "SessionController.hpp"
 
+#include <filesystem>
+#include <system_error>
 #include <exception>
 #include <iostream>
 #include <limits>
@@ -148,6 +150,137 @@ bool SessionController::previousChannel()
     return selectServiceLocked(*service);
 }
 
+bool SessionController::canControlPlaybackLocked(
+    std::uint64_t generationId
+) const
+{
+    return
+        state_ == SessionState::Running &&
+        activeSession_ != nullptr &&
+        activeSession_->isRunning() &&
+        !activeSession_->hasFatalError() &&
+        generationId == generationId_ &&
+        generationId ==
+            activeSession_->generationId();
+}
+
+bool SessionController::pause(
+    std::uint64_t generationId
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!canControlPlaybackLocked(generationId))
+    {
+        return false;
+    }
+
+    return playback_.pause();
+}
+
+bool SessionController::resume(
+    std::uint64_t generationId
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!canControlPlaybackLocked(generationId))
+    {
+        return false;
+    }
+
+    return playback_.resume();
+}
+
+bool SessionController::seek(
+    std::uint64_t generationId,
+    std::int64_t positionMs
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!canControlPlaybackLocked(generationId))
+    {
+        return false;
+    }
+
+    return playback_.seek(positionMs);
+}
+
+bool SessionController::goLive(
+    std::uint64_t generationId
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!canControlPlaybackLocked(generationId))
+    {
+        return false;
+    }
+
+    return playback_.goLive();
+}
+
+bool SessionController::goOldest(
+    std::uint64_t generationId
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!canControlPlaybackLocked(generationId))
+    {
+        return false;
+    }
+
+    return playback_.goOldest();
+}
+
+bool SessionController::acknowledgeSeek(
+    std::uint64_t generationId,
+    std::uint64_t seekRevision,
+    std::uint64_t actualPositionMs
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!canControlPlaybackLocked(generationId))
+    {
+        return false;
+    }
+
+    return playback_.acknowledgeSeek(
+        generationId,
+        seekRevision,
+        actualPositionMs
+    );
+}
+
+bool SessionController::reportPlaybackPosition(
+    std::uint64_t generationId,
+    std::uint64_t seekRevision,
+    std::uint64_t positionMs
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!canControlPlaybackLocked(generationId))
+    {
+        return false;
+    }
+
+    return playback_.reportPlaybackPosition(
+        generationId,
+        seekRevision,
+        positionMs
+    );
+}
+
+std::vector<TvService>
+SessionController::services() const
+{
+    return serviceManager_.services();
+}
+
 bool SessionController::selectServiceLocked(
     const TvService& service
 )
@@ -171,6 +304,25 @@ bool SessionController::selectServiceLocked(
         {
             return false;
         }
+
+	std::error_code ec;
+
+	std::filesystem::remove_all(
+	    hlsConfig_.outputDirectory /
+	        std::to_string(generationId_),
+	    ec
+	);
+
+	if (ec)
+	{
+	    failLocked(
+	        "Failed to remove previous HLS buffer: " +
+	        ec.message()
+	    );
+
+	    return false;
+	}
+
     }
 
     return startSessionLocked(service);
@@ -198,15 +350,28 @@ bool SessionController::startSessionLocked(
 
     try
     {
-        activeSession_ =
-            std::make_unique<ActiveSession>(
-                service,
-                generationId_,
-                hlsConfig_,
-                bufferConfig_
-            );
+	HlsConfig sessionHlsConfig = hlsConfig_;
+	BufferConfig sessionBufferConfig = bufferConfig_;
 
-        if (!activeSession_->start())
+	const auto sessionDirectory =
+	    hlsConfig_.outputDirectory /
+	    std::to_string(generationId_);
+
+	sessionHlsConfig.outputDirectory =
+	    sessionDirectory;
+
+	sessionBufferConfig.storageDirectory =
+	    sessionDirectory;
+
+	activeSession_ =
+	    std::make_unique<ActiveSession>(
+	        service,
+	        generationId_,
+	        sessionHlsConfig,
+	        sessionBufferConfig
+	    );
+
+     if (!activeSession_->start())
         {
             failLocked(
                 "Failed to start session: " +

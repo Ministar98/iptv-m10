@@ -590,8 +590,10 @@ void RtpProducer::publishStatistics()
     localStatistics_.resolvedPmtTables =
         programTables_.size();
 
-    std::lock_guard<std::mutex>
-        lock(stateMutex_);
+    localStatistics_.programs = programs_;
+    localStatistics_.programTables = programTables_;
+
+    std::lock_guard<std::mutex> lock(stateMutex_);
 
     publishedStatistics_ = localStatistics_;
 }
